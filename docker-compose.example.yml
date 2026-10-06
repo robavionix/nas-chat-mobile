@@ -1,0 +1,40 @@
+services:
+  chat:
+    image: ghcr.io/linuxserver/weixin:latest
+    container_name: chat-remote
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: Asia/Shanghai
+      LC_ALL: zh_CN.UTF-8
+      TITLE: Remote Desktop
+      # A tall portrait desktop; the phone view resizes the client window to 760 px wide.
+      SELKIES_MANUAL_WIDTH: "1800"
+      SELKIES_MANUAL_HEIGHT: "2800"
+      SELKIES_MANUAL_RESOLUTION: "true|locked"
+      SELKIES_USE_CSS_SCALING: "true|locked"
+      SELKIES_UI_SHOW_SIDEBAR: "false"
+      SELKIES_UI_SHOW_CORE_BUTTONS: "false"
+      CUSTOM_USER: user
+      # Also the phone view's login password.
+      PASSWORD: ${WEB_PASSWORD:?Set WEB_PASSWORD in .env}
+      SUBFOLDER: /
+      HARDEN_DESKTOP: "true"
+      HARDEN_OPENBOX: "true"
+      SELKIES_ENABLE_SHARING: "false"
+      SELKIES_ENABLE_COLLAB: "false"
+      SELKIES_FILE_TRANSFERS: upload,download
+      NO_GAMEPAD: "true"
+      NO_WEBCAM: "true"
+      AUTO_GPU: "false"
+      PIXELFLUX_WAYLAND: "false"
+    volumes:
+      - ./config:/config
+      - ./mobile-init:/custom-cont-init.d:ro
+      - ./mobile-services:/custom-services.d:ro
+    ports:
+      # Local only: put an HTTPS reverse proxy or tunnel in front of it.
+      - "127.0.0.1:5804:3000"
+    shm_size: 1gb
+    mem_limit: 4g
+    restart: unless-stopped

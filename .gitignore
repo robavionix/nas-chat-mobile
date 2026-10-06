@@ -1,0 +1,15 @@
+# Secrets and container data
+.env
+config/
+
+# Runtime files written next to server.py when the repository folder is used directly
+mobile/session.key
+mobile/send-results.json
+mobile/*.tmp
+mobile/uploads/
+mobile/debug/
+
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
