@@ -1,0 +1,2 @@
+pywebpush==2.5.0
+dbus-next==0.2.3

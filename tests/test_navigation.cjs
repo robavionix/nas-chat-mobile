@@ -2,7 +2,7 @@ const vm=require('vm'),fs=require('fs'),assert=require('assert');
 const source=fs.readFileSync('mobile/web/navigation.js','utf8');
 function setup(reduced=false){
   const animations=[],timers=new Map(),listeners={};let timerId=0;
-  function element(){return {style:{},children:[],removed:false,
+  function element(){return {style:{},children:[],removed:false,classList:{add(){},remove(){}},
     setAttribute(){},append(child){this.children.push(child)},prepend(child){this.children.unshift(child)},remove(){this.removed=true},
     getContext(){return {scale(){},fillRect(){},drawImage(){}}},
     animate(frames,options){let finish;const animation={frames,options,cancelled:false,finished:new Promise(resolve=>finish=resolve),finish:()=>finish(),cancel(){this.cancelled=true}};animations.push(animation);return animation}}}
@@ -50,6 +50,27 @@ async function exercise(reduced=false){
   c.screen.getBoundingClientRect=()=>({left:0,top:60,width:390,height:680});
   c.navigationLayoutChanged();assert.equal(token.cover.style.height,'680px','cover the taller list viewport when the composer disappears');
   c.cancelNavigationTransition();
+  c.box={conversation:'list',compactList:true};c.view='list';
+  token=c.beginNavigationTransition(1);c.cancelNavigationTransition();
+  c.box={conversation:'chat',compactList:false};c.view='chat';
+  token=c.beginNavigationTransition(-1,true);c.updateBackSwipe(token,140);
+  assert.equal(token.phase,'dragging');assert.equal(c.navigationAnimationRunning(),true);
+  assert.ok(token.preview,'use a local snapshot of the previous list while following the finger');
+  assert.equal(token.outgoing.style.transform,'translate3d(140px,0,0)');
+  token.phase='waiting';const list={conversation:'list',compactList:true};c.box=list;c.mirror.layout=list;c.renderDirty=false;
+  finished=c.finishNavigationTransition(token,list);
+  assert.equal(animations.at(-2).frames[0].transform,'translate3d(140px,0,0)','resume the release animation at the finger position');
+  for(const animation of animations)animation.finish();await Promise.resolve();await Promise.resolve();c.renderDirty=false;c.navigationPicturePainted();
+  assert.equal(await finished,true);
+  c.box={conversation:'chat',compactList:false};c.mirror.layout=c.box;c.view='chat';
+  token=c.beginNavigationTransition(-1,true);c.updateBackSwipe(token,120);
+  let requested=false;c.setView=()=>{requested=true;return Promise.resolve()};
+  const countBefore=animations.length;c.commitBackSwipe(token);
+  assert.equal(requested,true);assert.equal(animations.length,countBefore+2,'release animation must start before the remote view response');
+  for(const animation of animations.slice(countBefore))animation.finish();await Promise.resolve();await Promise.resolve();
+  assert.equal(token.phase,'waiting-frame');assert.equal(token.cover.removed,false,'show the cached list while the remote frame is in flight');
+  c.box=list;c.mirror.layout=list;c.renderDirty=false;finished=c.finishNavigationTransition(token,list);
+  assert.equal(await finished,true);assert.equal(animations.length,countBefore+2,'a late frame must not start a second slide');
   const render=fs.readFileSync('mobile/web/render.js','utf8');
   const paint=render.slice(render.indexOf('function paintMobile(now){'),render.lastIndexOf('requestAnimationFrame(paintMobile);'));
   let clears=0,painted=0;

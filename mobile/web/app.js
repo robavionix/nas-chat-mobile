@@ -192,13 +192,13 @@ async function update(force=false){
   }catch(e){transientError=!!e.transient;message(e.message,true)}
   finally{updating=false;if(pendingResize){pendingResize=false;scheduleAdapt()}}
 }
-async function setView(next){
-  if(busy||navigating||viewOnly)return;
+async function setView(next,swipe=null){
+  if(busy||navigating||viewOnly){if(swipe)cancelNavigationTransition(swipe);return}
   pendingSend=null;
-  if(popupActive()&&next!=='full')return;
+  if(popupActive()&&next!=='full'){if(swipe)cancelNavigationTransition(swipe);return}
   if(box?.compact&&!box.compactList&&next==='list'){
     const before=box.conversation,oldHeader=pictureHeader();draft.blur();navigating=true;controls();
-    const transition=beginNavigationTransition(-1);
+    const transition=swipe||beginNavigationTransition(-1);
     zoom=1;document.querySelector('#zoom').classList.remove('active');
     screen.scrollTop=0;screen.scrollLeft=0;menu.classList.remove('open');
     try{
@@ -209,6 +209,7 @@ async function setView(next){
     }catch(e){if(e.layout)acceptLayout(e.layout);message(e.message,true);return}finally{cancelNavigationTransition(transition);navigating=false;controls()}
     return;
   }
+  if(swipe)cancelNavigationTransition(swipe);
   if(box?.compactList&&next==='chat')return;
   view=next;zoom=1;document.querySelector('#zoom').classList.remove('active');
   screen.scrollTop=0;screen.scrollLeft=0;menu.classList.remove('open');applyView();fit();scheduleAdapt();
@@ -358,7 +359,7 @@ frame.addEventListener('load',()=>{if(view==='full')setTimeout(()=>{fit();update
 // render.js and touch.js load after this file; start once every script is in place.
 document.addEventListener('DOMContentLoaded',()=>{setInterval(()=>{if(!document.hidden)update()},8000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
-if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
+const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.3.0',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
 
 // Optional LAN configuration is generated on the deployment host, never baked into the bundle.
 fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{

@@ -8,6 +8,8 @@ mobile/send-results.json
 mobile/*.tmp
 mobile/uploads/
 mobile/debug/
+mobile/push/
+mobile/push-deps/
 
 # Deployment-only certificates, private icons, addresses and diagnostics
 lan-proxy/authority/

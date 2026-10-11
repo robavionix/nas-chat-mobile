@@ -64,13 +64,15 @@
     layer.setPointerCapture(e.pointerId);
     if (fingers.size===2) {
       // A second finger turns the gesture into a pinch.
-      cancelPress(); gesture=null;
+      cancelPress();if(gesture?.back){cancelAnimationFrame(gesture.backFrame);cancelNavigationTransition(gesture.back)}gesture=null;
       const p=distance(); pinch={start:p.d,zoom,x:p.x,y:p.y};
       return;
     }
     if (fingers.size>2 || busy || navigating) { gesture=null; return; }
     gesture={id:e.pointerId,x:e.clientX,y:e.clientY,lastX:e.clientX,lastY:e.clientY,time:performance.now(),lastTime:performance.now(),velocity:0,moved:false,pressed:false};
     const g=gesture;
+    const edge=e.clientX-screen.getBoundingClientRect().left;
+    g.edge=e.pointerType==='touch'&&edge>=0&&edge<=28&&zoom<=1.01&&!viewOnly&&chatOpen()&&box.compact;
     pressTimer=setTimeout(()=>{
       if(gesture!==g||g.moved||viewOnly)return;
       g.pressed=true; navigator.vibrate?.(12); ripple(g.x,g.y,true);
@@ -88,6 +90,19 @@
     }
     if (!gesture || gesture.id!==e.pointerId) return;
     const now=performance.now(), dx=e.clientX-gesture.lastX, dy=e.clientY-gesture.lastY, dt=Math.max(8,now-gesture.lastTime);
+    const totalX=e.clientX-gesture.x,totalY=e.clientY-gesture.y;
+    if(gesture.edge&&!gesture.back&&!gesture.pressed){
+      if(totalX>12&&totalX>Math.abs(totalY)*1.3){gesture.back=beginNavigationTransition(-1,true);gesture.edge=false;cancelPress();cancelAnimationFrame(scrollFrame);scrollFrame=0;pendingDelta=0;gesture.moved=true}
+      else if(Math.abs(totalY)>12||totalX< -8)gesture.edge=false;
+    }
+    if(gesture.back){
+      gesture.velocityX=.5*(gesture.velocityX||0)+.5*dx/dt;
+      gesture.lastX=e.clientX;gesture.lastY=e.clientY;gesture.lastTime=now;
+      gesture.backDistance=totalX;
+      const g=gesture;
+      if(!g.backFrame)g.backFrame=requestAnimationFrame(()=>{g.backFrame=0;if(gesture===g)updateBackSwipe(g.back,g.backDistance||0)});
+      return;
+    }
     if (!gesture.moved && Math.hypot(e.clientX-gesture.x,e.clientY-gesture.y)>8) { gesture.moved=true; cancelPress(); }
     if (gesture.moved && !gesture.pressed) {
       if (screen.scrollWidth>screen.clientWidth+1) screen.scrollLeft-=dx;
@@ -101,6 +116,13 @@
     if (pinch) { if(!fingers.size) pinch=null; return; }
     if (!gesture || gesture.id!==e.pointerId) return;
     const g=gesture; gesture=null; e.preventDefault(); cancelPress();flushLocal();
+    if(g.back){
+      cancelAnimationFrame(g.backFrame);updateBackSwipe(g.back,Math.max(0,e.clientX-g.x));
+      const quick=performance.now()-g.lastTime<100&&(g.velocityX||0)>.5&&g.back.progress>40;
+      if(!cancelled&&(g.back.progress>=g.back.width*.32||quick))commitBackSwipe(g.back);
+      else{navigating=true;controls();cancelBackSwipe(g.back).finally(()=>{navigating=false;controls()})}
+      return;
+    }
     if (cancelled || g.pressed) { stop(); return; }
     if (g.moved) { if(performance.now()-g.lastTime<100) coast(g.velocity); return; }
     if (viewOnly) return;
@@ -118,6 +140,6 @@
   },{passive:false});
   layer.addEventListener('contextmenu',e=>e.preventDefault());
   window.addEventListener('resize',()=>stop());
-  window.addEventListener('nas-navigation-start',()=>{stop();cancelAnimationFrame(scrollFrame);scrollFrame=0;pendingDelta=0;cancelPress();gesture=null;pinch=null;fingers.clear()});
+  window.addEventListener('nas-navigation-start',()=>{stop();cancelAnimationFrame(scrollFrame);cancelAnimationFrame(gesture?.backFrame);scrollFrame=0;pendingDelta=0;cancelPress();gesture=null;pinch=null;fingers.clear()});
   window.addEventListener('pagehide',()=>{stop();cancelAnimationFrame(scrollFrame);scrollFrame=0;pendingDelta=0});
 })();

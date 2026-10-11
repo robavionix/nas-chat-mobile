@@ -1,4 +1,5 @@
 import socket
+import sys
 import json, os, subprocess, threading, time, secrets, hmac, hashlib, re, ctypes, shutil, struct, zlib, io, base64
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, parse_qs
@@ -9,6 +10,9 @@ from PIL import Image
 
 os.environ.update(DISPLAY=':1', HOME='/config')
 ROOT = Path('/config/mobile')
+sys.path.insert(0, str(ROOT / 'push-deps'))
+from push_service import PushService
+push_service = PushService(ROOT)
 UPLOADS = ROOT / 'uploads'
 lock = threading.Lock()
 keyfile = ROOT / 'session.key'
@@ -414,6 +418,13 @@ def authenticated(headers):
         return int(expiry) > time.time() and hmac.compare_digest(expected, signature)
     except (KeyError, ValueError):
         return False
+
+
+def push_owner(headers):
+    cookie = SimpleCookie()
+    cookie.load(headers.get('Cookie', ''))
+    value = cookie['__Host-nas_wechat'].value
+    return hashlib.sha256(value.encode()).hexdigest(), int(value.split('.')[0])
 
 
 def clean_uploads():
@@ -901,6 +912,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlsplit(self.path)
+        if url.path == '/push/status':
+            if not authenticated(self.headers):
+                return self.reply(401, error='请重新登录')
+            if not push_service.accepts(self.headers):
+                return self.reply(200, ok=True, available=False, reason='推送只在已配置的外网入口提供')
+            owner, _ = push_owner(self.headers)
+            return self.reply(200, ok=True, **push_service.status(owner))
         if url.path == '/ws':
             return self.websocket()
         if url.path == '/frame':
@@ -949,13 +967,38 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(400, error='请求格式错误')
             if self.path == '/login':
                 return self.login(payload)
+            if self.path.startswith('/push/'):
+                if not authenticated(self.headers):
+                    return self.reply(401, error='请重新登录')
+                if not push_service.accepts(self.headers):
+                    return self.reply(403, error='请从外网入口设置消息推送')
+                owner, expiry = push_owner(self.headers)
+                try:
+                    if self.path == '/push/subscribe':
+                        identity = push_service.subscribe(owner, expiry, payload.get('subscription'), payload.get('preview'))
+                        return self.reply(200, ok=True, id=identity)
+                    if self.path == '/push/unsubscribe':
+                        identity = payload.get('id')
+                        if not isinstance(identity, str):
+                            raise ValueError('推送订阅无效')
+                        push_service.unsubscribe(owner, identity)
+                        return self.reply(200, ok=True)
+                    if self.path == '/push/test':
+                        ticket = push_service.test(owner, payload.get('id'))
+                        return self.reply(200, ok=True, testId=ticket)
+                    return self.reply(404, error='不存在的推送操作')
+                except ValueError as error:
+                    return self.reply(400, error=str(error))
             if self.path == '/debug':
                 debug('phone', agent=self.headers.get('User-Agent', '')[:160], data=payload)
                 return self.reply(200, ok=True)
             if self.path == '/logout':
+                if authenticated(self.headers):
+                    push_service.unsubscribe(push_owner(self.headers)[0])
                 return self.reply(200, cookie='__Host-nas_wechat=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
             if self.path == '/logout-all':
                 global session_key
+                push_service.revoke_all()
                 session_key = secrets.token_bytes(32)
                 temporary = keyfile.with_suffix('.tmp'); temporary.write_bytes(session_key); temporary.chmod(0o600); temporary.replace(keyfile)
                 return self.reply(200, cookie='__Host-nas_wechat=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
@@ -1255,4 +1298,5 @@ class Handler(BaseHTTPRequestHandler):
 
 UPLOADS.mkdir(mode=0o700, exist_ok=True)
 threading.Thread(target=clean_uploads, daemon=True).start()
+push_service.start()
 ThreadingHTTPServer(('127.0.0.1', 8089), Handler).serve_forever()

@@ -1,6 +1,6 @@
 # nas-chat-mobile
 
-当前版本：**0.2.0** · [更新记录](CHANGELOG.md)
+当前版本：**0.3.0** · [更新记录](CHANGELOG.md)
 
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
@@ -12,6 +12,8 @@
 
 - **手机竖屏视图**：会话列表和聊天两种视图，标题栏固定，内容在手机本地平滑滚动；支持双指缩放和「Aa」放大。
 - **会话过渡**：新画面绘制完成后才做 220 毫秒匀速滑动；独立快照覆盖画布改尺寸的过程，返回列表时也覆盖增高的区域，支持系统减少动态效果设置。
+- **侧滑返回**：聊天画面的左侧边缘向右滑动，画面跟随手指；滑动不足回弹，完成后立即用本地快照返回会话列表，再衔接实际画面，网络等待不会卡住松手动画。竖向滚动和双指缩放保留各自手势。
+- **可选后台通知**：公网 HTTPS 入口可开启 Web Push，支持测试通知和消息内容预览开关；默认隐藏内容，退出登录撤销该会话的订阅。
 - **触控操作**：点击、长按（打开右键菜单，可复制、转发、引用、撤回等）、滑动和惯性滚动。复制的内容可以一键复制到手机剪贴板。
 - **发送文字**：点击发送立即清空已提交的文字，随后输入下一条不会被旧请求清空；未确认的发送按原会话保留。后端核对输入内容与聊天对象，请求带幂等 ID，避免重复发送。
 - **发送照片和文件**：支持文件选择和剪贴板图片粘贴，发送前显示当前聊天标题供核对，单个文件最大 95 MB。
@@ -37,6 +39,7 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 - `mobile-init/50-mobile`：容器启动时修改容器内 nginx 配置，加上 Cookie 鉴权（`auth_request`）和上面的路由，并启动后端服务。
 - `mobile-services/mobile/run`：以容器用户运行 `server.py`。
 - `mobile/server.py`：读取窗口布局、截取画面、执行点击 / 滚动 / 粘贴 / 发送，全部通过标准 X11 接口完成。
+- `mobile/push_service.py`：可选推送服务，监听标准 D-Bus 桌面通知并用 Web Push 加密投递；不读取聊天数据库或客户端通信协议。
 - `mobile/web/`：手机界面。
 - `scripts/setup-lan.sh` / `lan-proxy/`：可选内网 HTTPS 部署工具与代理模板。
 
@@ -107,12 +110,41 @@ sudo env CHAT_ROOT=/absolute/path/chat-remote \
 
 固定 NAS 的内网 IP；IP 变化后需要重新运行脚本。请在服务器证书到期前重新运行同一命令续签。正常续签不更换根 CA，无需重新安装根证书。NAS 防火墙还需允许家庭网段访问所选端口；不要把这个端口映射到公网。
 
+## 可选：外网消息推送
+
+为运行中的容器安装可选依赖（下列容器名 `chat` 请替换为自己的名称）：
+
+```sh
+docker exec chat /lsiopy/bin/python3 -m pip install \
+  --target /config/mobile/push-deps -r /config/mobile/requirements-push.txt
+```
+
+以容器运行用户创建 `config/mobile/push/settings.json`，仅写入自己的外网 HTTPS 源地址，不带路径：
+
+```json
+{"origin":"https://chat.example.com"}
+```
+
+该目录需容器运行用户可写、权限为 `700`，配置文件权限为 `600`。重启 Python 服务：
+
+```sh
+docker exec chat s6-svc -r /run/wechat-mobile-service
+```
+
+服务会生成并保留 VAPID 私钥与订阅文件。请勿公开 `config/mobile/push/`，升级时保留此目录。未配置或未安装依赖时，聊天功能继续运行，推送不启用。
+
+从外网入口打开菜单，开启“消息推送”，允许系统通知，再按“发送测试通知”。菜单会等待服务器投递结果，区分“已排队”与“推送服务已接受”；后者仍需在手机上确认，系统专注模式等设置可能影响显示。通知组件更新完成后才允许开启。iPhone / iPad 需 iOS / iPadOS 16.4 或以上，通过 Safari 添加到主屏幕后，从主屏幕打开并开启；普通 Safari 标签页不支持这项后台推送。参见 [WebKit 说明](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/)。支持 Apple、Chrome / Chromium 的 FCM 和 Firefox 推送端点；其他推送服务端点默认拒绝。
+
+消息来源是客户端的标准桌面通知：客户端需启用新消息通知，静音会话或客户端当前焦点等行为可能抑制通知。测试通知仅验证浏览器投递通道；实际来信需另外验证。通知点击后返回会话列表，不根据通知文字猜测并打开联系人。订阅最多保持到网页登录会话到期（30 天），重新登录后需主动开启。
+
+建议使用稳定的 HTTPS 域名或隧道地址。临时隧道地址改变后，需更新 `origin`、重启服务，并在新地址重新添加主屏幕入口和开启通知。内网 IP 入口不提供此开关。
+
 ## 升级
 
 先备份部署目录中的 `config/mobile/`、`mobile-init/`、`mobile-services/`，然后在源码仓库执行 `git pull --ff-only`。复制新版后端、网页脚本与 HTML、启动脚本到部署目录，重启主容器，使 nginx 的 WebSocket 路由生效：
 
 ```sh
-cp mobile/server.py ../chat-remote/config/mobile/
+cp mobile/server.py mobile/push_service.py mobile/requirements-push.txt ../chat-remote/config/mobile/
 cp mobile/web/*.js mobile/web/*.html ../chat-remote/config/mobile/web/
 cp mobile-init/50-mobile ../chat-remote/mobile-init/
 cp mobile-services/mobile/run ../chat-remote/mobile-services/mobile/
@@ -125,22 +157,25 @@ docker compose restart chat
 
 ## 回归检查
 
-在仓库根目录运行，需要 Python 3 + Pillow 和 Node.js：
+在仓库根目录运行，需要 Python 3 + Pillow + cryptography 和 Node.js：
 
 ```sh
-python -m py_compile mobile/server.py
+python -m py_compile mobile/server.py mobile/push_service.py
 python tests/test_transport.py
+python tests/test_push.py
 node tests/test_transport.cjs
 node tests/test_fallback.cjs
 node tests/test_send.cjs
 node tests/test_paste.cjs
 node tests/test_navigation.cjs
+node tests/test_swipe.cjs
+node tests/test_push.cjs
 bash -n scripts/setup-lan.sh
 bash -n mobile-init/50-mobile
 bash -n mobile-services/mobile/run
 ```
 
-这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴与过渡生命周期，不会向真实联系人发送测试消息。
+这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴、过渡与侧滑生命周期，以及通知权限、订阅撤销、过期处理和消息预览。不会向真实联系人或真实推送端点发送测试消息。
 
 ## 配置说明
 
@@ -168,7 +203,7 @@ bash -n mobile-services/mobile/run
 ## 免责声明
 
 1. 本项目是个人学习与自用目的的开源工具，与深圳市腾讯计算机系统有限公司（"腾讯"）及其关联公司**没有任何关联**，未获其授权、赞助或认可。"微信""WeChat""Weixin"及相关标识是腾讯的商标或注册商标，本项目提及这些名称仅为说明所兼容的软件。
-2. 本项目**不包含、不分发、不修改、不破解、不逆向工程**任何腾讯客户端或通信协议。它只通过标准 X11 接口（读取屏幕、模拟鼠标和键盘）操作使用者自己在容器中运行的官方客户端窗口，工作方式与远程桌面相同。客户端程序由第三方镜像在运行时获取，其使用受腾讯相关协议约束。
+2. 本项目**不包含、不分发、不修改、不破解、不逆向工程**任何腾讯客户端或通信协议。它仅通过标准 X11 接口（读取屏幕、模拟鼠标和键盘）及标准桌面通知接口，操作使用者自己在容器中运行的官方客户端窗口并接收其系统通知，工作方式与远程桌面相同。客户端程序由第三方镜像在运行时获取，其使用受腾讯相关协议约束。
 3. **仅限使用者本人用自己的账号使用。** 不得将本项目用于：群发消息、营销推广、自动回复或聊天机器人、批量添加好友、账号买卖或代运营、监控他人通讯、收集他人个人信息，以及任何违反《腾讯微信软件许可及服务协议》《微信个人账号使用规范》等平台规则或所在地法律法规（包括但不限于《中华人民共和国网络安全法》《数据安全法》《个人信息保护法》）的行为。
 4. 通过非官方方式使用客户端，可能导致账号受到限制或封禁，相关风险由使用者自行承担。
 5. 本项目只在使用者自己的服务器上处理画面和文件，作者不收集任何数据。请妥善保管服务器和访问密码。
@@ -183,6 +218,6 @@ bash -n mobile-services/mobile/run
 
 ## English summary
 
-**nas-chat-mobile 0.2.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. Existing neutral branding and icons are retained.
+**nas-chat-mobile 0.3.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. Existing neutral branding and icons are retained.
 
 This is an unofficial project. It is not affiliated with or endorsed by Tencent. "WeChat" and "Weixin" are trademarks of Tencent and are mentioned only to describe compatibility. The project does not include, modify, or reverse-engineer any Tencent software or protocol. Use it only with your own account and in compliance with the platform's terms and applicable law; do not use it for bulk messaging, marketing, bots, or monitoring others. Provided as is, without warranty, under the [MIT License](LICENSE).
