@@ -1,16 +1,18 @@
 #!/usr/bin/with-contenv bash
 set -e
-python3 - <<'PY'
+/custom-services.d/mobile/python - <<'PY'
 from pathlib import Path
 import re
 p=Path('/etc/nginx/sites-enabled/default')
 s=p.read_text()
-if '# mobile-session-v11' not in s:
+web_root = '/var/www/nas-chat-mobile/' if Path('/var/www/nas-chat-mobile').is_dir() else '/config/mobile/web/'
+web_marker = '# mobile-static-root=' + web_root
+if '# mobile-session-v12' not in s or web_marker not in s:
     s=re.sub(r'  # mobile-wechat\n.*?(?=  location / \{)', '', s, flags=re.S)
     s=re.sub(r'  auth_basic\s+"Login";\n', '', s)
     s=re.sub(r'  auth_basic_user_file\s+/etc/nginx/.htpasswd;\n', '', s)
     block=r'''  # mobile-wechat
-  # mobile-session-v11
+  # mobile-session-v12
   absolute_redirect off;
   auth_request /_mobile_auth;
   location = /_mobile_auth {
@@ -121,6 +123,7 @@ if '# mobile-session-v11' not in s:
     proxy_read_timeout 30s;
   }
 '''
+    block=block.replace('/config/mobile/web/', web_root).replace('# mobile-session-v12', '# mobile-session-v12\n  ' + web_marker)
     s=s.replace('  location / {',block+'  location / {')
     p.write_text(s)
 PY

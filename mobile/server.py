@@ -8,9 +8,11 @@ from collections import deque, defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from PIL import Image
 
-os.environ.update(DISPLAY=':1', HOME='/config')
+os.environ.setdefault('DISPLAY', ':1')
+os.environ['HOME'] = '/config'
 ROOT = Path('/config/mobile')
-sys.path.insert(0, str(ROOT / 'push-deps'))
+if os.environ.get('NAS_CHAT_BUNDLED_DEPS') != '1':
+    sys.path.insert(0, str(ROOT / 'push-deps'))
 from push_service import PushService
 push_service = PushService(ROOT)
 UPLOADS = ROOT / 'uploads'
@@ -91,7 +93,7 @@ IGNORED_TYPES = {'DESKTOP', 'DOCK', 'TOOLTIP', 'NOTIFICATION', 'DND'}
 class X:
     def __enter__(self):
         x_lock.acquire()
-        self.d = _x.XOpenDisplay(b':1')
+        self.d = _x.XOpenDisplay(os.environ['DISPLAY'].encode())
         if not self.d:
             x_lock.release()
             raise ValueError('Display unavailable')

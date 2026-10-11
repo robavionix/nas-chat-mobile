@@ -1,11 +1,18 @@
 services:
   chat:
-    image: ghcr.io/linuxserver/weixin:latest
+    image: nas-chat-mobile:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-ghcr.io/linuxserver/weixin@sha256:ef55da929cab5fae1f45b902b94918234604fa1473a7a7322383614a51573059}
     container_name: chat-remote
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
+      DISPLAY: ":1"
+      # Disable nested Docker from the desktop base image; it is not needed here.
+      START_DOCKER: "false"
       LC_ALL: zh_CN.UTF-8
       TITLE: Remote Desktop
       # A tall portrait desktop; the phone view resizes the client window to 760 px wide.
@@ -30,11 +37,19 @@ services:
       PIXELFLUX_WAYLAND: "false"
     volumes:
       - ./config:/config
+      # nginx runs as www-data; expose only public web assets, not private /config.
+      - ./config/mobile/web:/var/www/nas-chat-mobile:ro
       - ./mobile-init:/custom-cont-init.d:ro
       - ./mobile-services:/custom-services.d:ro
     ports:
       # Local only: put an HTTPS reverse proxy or tunnel in front of it.
-      - "127.0.0.1:5804:3000"
-    shm_size: 1gb
-    mem_limit: 4g
+      - "127.0.0.1:${HTTP_PORT:-5804}:3000"
+    shm_size: ${SHM_SIZE:-1gb}
+    mem_limit: ${MEM_LIMIT:-4g}
+    healthcheck:
+      test: ["CMD", "s6-setuidgid", "abc", "/custom-services.d/mobile/python", "/custom-services.d/mobile/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 3
     restart: unless-stopped

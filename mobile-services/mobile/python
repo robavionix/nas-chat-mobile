@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# The first path belongs to our derived image; the second supports older deployments.
+for interpreter in /opt/nas-chat-mobile/venv/bin/python3 /lsiopy/bin/python3 /usr/bin/python3; do
+  if [ -x "$interpreter" ]; then
+    if [ "$interpreter" = /opt/nas-chat-mobile/venv/bin/python3 ]; then
+      export NAS_CHAT_BUNDLED_DEPS=1
+    fi
+    exec "$interpreter" "$@"
+  fi
+done
+echo 'nas-chat-mobile: Python 3 is missing; rebuild the deployment image.' >&2
+exit 1

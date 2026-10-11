@@ -1,0 +1,7 @@
+# Only dependency definitions belong in the image build context.
+# Application files are installed separately; no private /config or icons enter a layer.
+**
+!Dockerfile
+!mobile/
+!mobile/requirements.txt
+!mobile/requirements-push.txt

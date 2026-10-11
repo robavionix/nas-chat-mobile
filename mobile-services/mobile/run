@@ -1,2 +1,2 @@
 #!/usr/bin/with-contenv bash
-exec s6-setuidgid abc /lsiopy/bin/python3 /config/mobile/server.py
+exec s6-setuidgid abc /custom-services.d/mobile/python /config/mobile/server.py

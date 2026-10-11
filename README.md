@@ -1,6 +1,6 @@
 # nas-chat-mobile
 
-当前版本：**0.3.0** · [更新记录](CHANGELOG.md)
+当前版本：**0.4.0** · [更新记录](CHANGELOG.md)
 
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
@@ -38,6 +38,7 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 
 - `mobile-init/50-mobile`：容器启动时修改容器内 nginx 配置，加上 Cookie 鉴权（`auth_request`）和上面的路由，并启动后端服务。
 - `mobile-services/mobile/run`：以容器用户运行 `server.py`。
+- `Dockerfile` / `scripts/setup.sh` / `scripts/doctor.sh`：为 x86_64 或 ARM64 本机构建依赖，准备部署目录并检查环境；Compose 健康检查验证后端和 X11。
 - `mobile/server.py`：读取窗口布局、截取画面、执行点击 / 滚动 / 粘贴 / 发送，全部通过标准 X11 接口完成。
 - `mobile/push_service.py`：可选推送服务，监听标准 D-Bus 桌面通知并用 Web Push 加密投递；不读取聊天数据库或客户端通信协议。
 - `mobile/web/`：手机界面。
@@ -45,18 +46,24 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 
 ## 环境要求
 
-- Docker 与 docker compose。已在 ARM64（RK3588 NAS）上测试，x86_64 应同样可用。
+- 64 位 Linux：支持 Intel / AMD x86_64（`linux/amd64`）和 ARM64（`linux/arm64`），包括普通服务器、虚拟机和提供 Docker 的 NAS。32 位 x86 / ARMv7 不支持。
+- Docker Engine（至少 20.10，建议受维护版本）与 Docker Compose v2；安装脚本需要 Bash。详见 [通用 Linux 与群晖部署说明](docs/linux-deployment.md)。
 - 可用的 HTTPS 访问方式：反向代理、Cloudflare Tunnel、VPN 等。登录 Cookie 带有 `Secure` 和 `__Host-` 前缀，纯 HTTP 无法登录。
-- 建议内存 4 GB 以上。
+- 建议宿主机内存 4 GB 以上，镜像与构建缓存预留至少 12 GB 磁盘，聊天数据另计。不需要 GPU 或宿主机桌面。
+
+0.4.0 已完成原生 x86_64 Linux 容器构建与截图、输入、登录、WebSocket 冒烟验证；群晖真机与真实账号操作尚待部署验证，详见 [验证范围](docs/linux-deployment.md#验证与故障定位)。
 
 ## 安装
 
-1. 准备目录：
+1. 在源码目录运行安装脚本，准备一个新的独立部署目录（将绝对路径换成自己的路径）：
 
    ```
    chat-remote/
    ├── docker-compose.yml        ← 复制自 docker-compose.example.yml
-   ├── .env                      ← 复制自 .env.example，并设置密码
+   ├── .env                      ← 脚本生成随机密码与用户 ID
+   ├── Dockerfile / .dockerignore ← 在本机为当前架构构建依赖
+   ├── mobile/requirements*.txt   ← 构建时使用，不包含运行数据
+   ├── doctor.sh                 ← 只读部署检查
    ├── config/                   ← 容器数据，首次启动时生成
    │   └── mobile/               ← 复制本仓库的 mobile/ 目录
    ├── mobile-init/50-mobile
@@ -65,25 +72,24 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 
    ```sh
    git clone https://github.com/robavionix/nas-chat-mobile.git
-   mkdir -p chat-remote/config
    cd nas-chat-mobile
-   cp docker-compose.example.yml ../chat-remote/docker-compose.yml
-   cp .env.example ../chat-remote/.env
-   cp -r mobile ../chat-remote/config/
-   cp -r mobile-init mobile-services ../chat-remote/
-   chmod +x ../chat-remote/mobile-init/50-mobile ../chat-remote/mobile-services/mobile/run
+   bash scripts/setup.sh /absolute/path/chat-remote
    ```
 
-2. 编辑 `.env`，把 `WEB_PASSWORD` 设成一个足够长的随机字符串（例如 `openssl rand -hex 16`），并让 `PUID` / `PGID` 与 `config/` 目录的所有者一致。
+2. 脚本生成随机 `WEB_PASSWORD` 并保存在部署目录的 `.env`，PUID / PGID 默认取当前用户；以 root 执行需明确指定数据所属普通用户。可以在 `.env` 调整端口、时区和内存上限。脚本拒绝覆盖已有目录，不会复制旧的会话密钥、证书或原生 Python 扩展。
 
 3. 启动：
 
    ```sh
-   cd ../chat-remote
-   docker compose up -d
+   cd /absolute/path/chat-remote
+   bash doctor.sh
+   docker compose up -d --build
+   docker compose ps
    ```
 
-4. 为 `127.0.0.1:5804` 配置 HTTPS 访问（反向代理或隧道）。**不要直接把它以 HTTP 暴露到公网。**
+   Docker 自动选择当前架构。首次构建包含桌面镜像下载与依赖安装；之后启动不再安装依赖。`chat` 应在几分钟内显示 `healthy`。群晖的 PUID / PGID、项目创建和 DSM 代理设置见 [部署说明](docs/linux-deployment.md#群晖-dsm)。
+
+4. 为 `127.0.0.1:5804` 配置 HTTPS 访问（反向代理或隧道），并保留 WebSocket、Host 与 Origin。**不要直接把它以 HTTP 暴露到公网。**
 
 5. 首次使用：用电脑浏览器打开 `https://你的域名/index.html`（原远程桌面），在里面完成客户端登录。
 
@@ -112,10 +118,10 @@ sudo env CHAT_ROOT=/absolute/path/chat-remote \
 
 ## 可选：外网消息推送
 
-为运行中的容器安装可选依赖（下列容器名 `chat` 请替换为自己的名称）：
+0.4.0 的本机构建镜像已包含推送依赖，但仍需主动配置 origin 和在手机上启用。旧部署若仍使用上游原始镜像，可安装可选依赖（使用自己的实际容器名）：
 
 ```sh
-docker exec chat /lsiopy/bin/python3 -m pip install \
+docker exec chat-remote /lsiopy/bin/python3 -m pip install \
   --target /config/mobile/push-deps -r /config/mobile/requirements-push.txt
 ```
 
@@ -128,7 +134,7 @@ docker exec chat /lsiopy/bin/python3 -m pip install \
 该目录需容器运行用户可写、权限为 `700`，配置文件权限为 `600`。重启 Python 服务：
 
 ```sh
-docker exec chat s6-svc -r /run/wechat-mobile-service
+docker exec chat-remote s6-svc -r /run/wechat-mobile-service
 ```
 
 服务会生成并保留 VAPID 私钥与订阅文件。请勿公开 `config/mobile/push/`，升级时保留此目录。未配置或未安装依赖时，聊天功能继续运行，推送不启用。
@@ -144,16 +150,18 @@ docker exec chat s6-svc -r /run/wechat-mobile-service
 先备份部署目录中的 `config/mobile/`、`mobile-init/`、`mobile-services/`，然后在源码仓库执行 `git pull --ff-only`。复制新版后端、网页脚本与 HTML、启动脚本到部署目录，重启主容器，使 nginx 的 WebSocket 路由生效：
 
 ```sh
-cp mobile/server.py mobile/push_service.py mobile/requirements-push.txt ../chat-remote/config/mobile/
+cp mobile/server.py mobile/push_service.py mobile/requirements*.txt ../chat-remote/config/mobile/
 cp mobile/web/*.js mobile/web/*.html ../chat-remote/config/mobile/web/
 cp mobile-init/50-mobile ../chat-remote/mobile-init/
-cp mobile-services/mobile/run ../chat-remote/mobile-services/mobile/
-chmod +x ../chat-remote/mobile-init/50-mobile ../chat-remote/mobile-services/mobile/run
+cp mobile-services/mobile/run mobile-services/mobile/python mobile-services/mobile/healthcheck.py ../chat-remote/mobile-services/mobile/
+chmod +x ../chat-remote/mobile-init/50-mobile ../chat-remote/mobile-services/mobile/run ../chat-remote/mobile-services/mobile/python
 cd ../chat-remote
 docker compose restart chat
 ```
 
 已有的 `.env`、会话密钥、发送幂等记录、证书和图标不需要覆盖。自定义过 HTML 时，先合并自己的标题、图标链接与菜单入口；如启用内网代理，运行新版设置脚本生成部署配置。刷新手机页面即可加载新脚本。
+
+上述是旧上游镜像部署的兼容升级方式。要采用 0.4.0 的依赖镜像，另外复制 `Dockerfile`、`.dockerignore` 和 `mobile/requirements*.txt` 到部署目录对应位置，将 Compose 的 `image` / `build` 配置按新版示例合并，保留原来的端口、环境变量和卷。先备份原 Compose 与镜像，再执行 `docker compose up -d --build`；只执行 `restart` 不会切换镜像。跨架构迁移请先阅读 [迁移说明](docs/linux-deployment.md#从-arm64-迁移到-x86_64)，不要复制旧的 `push-deps/`。
 
 ## 回归检查
 
@@ -173,6 +181,10 @@ node tests/test_push.cjs
 bash -n scripts/setup-lan.sh
 bash -n mobile-init/50-mobile
 bash -n mobile-services/mobile/run
+bash -n mobile-services/mobile/python
+bash -n scripts/setup.sh
+bash -n scripts/doctor.sh
+bash tests/test_deploy.sh
 ```
 
 这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴、过渡与侧滑生命周期，以及通知权限、订阅撤销、过期处理和消息预览。不会向真实联系人或真实推送端点发送测试消息。
@@ -203,7 +215,7 @@ bash -n mobile-services/mobile/run
 ## 免责声明
 
 1. 本项目是个人学习与自用目的的开源工具，与深圳市腾讯计算机系统有限公司（"腾讯"）及其关联公司**没有任何关联**，未获其授权、赞助或认可。"微信""WeChat""Weixin"及相关标识是腾讯的商标或注册商标，本项目提及这些名称仅为说明所兼容的软件。
-2. 本项目**不包含、不分发、不修改、不破解、不逆向工程**任何腾讯客户端或通信协议。它仅通过标准 X11 接口（读取屏幕、模拟鼠标和键盘）及标准桌面通知接口，操作使用者自己在容器中运行的官方客户端窗口并接收其系统通知，工作方式与远程桌面相同。客户端程序由第三方镜像在运行时获取，其使用受腾讯相关协议约束。
+2. 本项目**不包含、不分发、不修改、不破解、不逆向工程**任何腾讯客户端或通信协议。它仅通过标准 X11 接口（读取屏幕、模拟鼠标和键盘）及标准桌面通知接口，操作使用者自己在容器中运行的官方客户端窗口并接收其系统通知，工作方式与远程桌面相同。客户端程序由使用者自行获取并运行的第三方镜像提供，其使用受腾讯相关协议约束。
 3. **仅限使用者本人用自己的账号使用。** 不得将本项目用于：群发消息、营销推广、自动回复或聊天机器人、批量添加好友、账号买卖或代运营、监控他人通讯、收集他人个人信息，以及任何违反《腾讯微信软件许可及服务协议》《微信个人账号使用规范》等平台规则或所在地法律法规（包括但不限于《中华人民共和国网络安全法》《数据安全法》《个人信息保护法》）的行为。
 4. 通过非官方方式使用客户端，可能导致账号受到限制或封禁，相关风险由使用者自行承担。
 5. 本项目只在使用者自己的服务器上处理画面和文件，作者不收集任何数据。请妥善保管服务器和访问密码。
@@ -218,6 +230,8 @@ bash -n mobile-services/mobile/run
 
 ## English summary
 
-**nas-chat-mobile 0.3.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. Existing neutral branding and icons are retained.
+**nas-chat-mobile 0.4.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. Existing neutral branding and icons are retained.
+
+Native Linux amd64 and arm64 deployments share one Compose configuration. The local Docker build installs isolated Python and X11 dependencies; setup, environment checks, health checks and Synology instructions are included. See [Linux deployment and validation scope](docs/linux-deployment.md).
 
 This is an unofficial project. It is not affiliated with or endorsed by Tencent. "WeChat" and "Weixin" are trademarks of Tencent and are mentioned only to describe compatibility. The project does not include, modify, or reverse-engineer any Tencent software or protocol. Use it only with your own account and in compliance with the platform's terms and applicable law; do not use it for bulk messaging, marketing, bots, or monitoring others. Provided as is, without warranty, under the [MIT License](LICENSE).
