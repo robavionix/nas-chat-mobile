@@ -2,6 +2,12 @@ const frame=document.querySelector('#desktop'),screen=document.querySelector('#s
 const attach=document.querySelector('#attach'),picker=document.querySelector('#picker'),menu=document.querySelector('#menu');
 const viewOnly=new URLSearchParams(location.search).get('observe')==='1';
 const chatDrafts=new Map(),fittedPopups=new Set();
+const sendRecoveries=new Map();
+function sendDraftKey(value=box){return value?String(value.id??value.window)+':'+value.conversation:''}
+function renderSendRecovery(){
+  const panel=document.querySelector('#send-recovery');if(!panel)return;
+  panel.hidden=!sendRecoveries.has(sendDraftKey());
+}
 let view='chat',box=null,busy=false,navigating=false,visualPending=false,composing=false,zoom=1,updating=false,pendingResize=false,pendingSend=null,pendingUpload=null,adaptTimer=null,messageTimer=null,offlineShown=false,preparedWindow=false,transientError=false,baselineHeight=window.visualViewport?.height||innerHeight;
 // Temporary diagnostics: touch positions and results, never message text.
 const debugQueue=[];let debugTimer=0;
@@ -25,8 +31,9 @@ function popupActive(){return view!=='full'&&!!box?.popups?.length}
 function activePopup(){return popupActive()?box.popups[0]:null}
 function chatOpen(){return !!box?.chatReady&&!box.compactList&&!popupActive()}
 function controls(){
-  const blocked=viewOnly||busy||navigating||visualPending||!connected()||!chatOpen();
+  const blocked=viewOnly||busy||navigating||visualPending||!connected()||!chatOpen()||sendRecoveries.has(sendDraftKey());
   send.disabled=blocked||composing||!draft.value.trim();send.textContent=busy?'发送中':'发送';attach.disabled=blocked;
+  renderSendRecovery();
 }
 async function call(path,data){
   let response;
@@ -47,7 +54,7 @@ function acceptLayout(next){
     const newChat=!next.compactList?next.conversation?.split(':').slice(1).join(':'):null;
     if(oldChat)chatDrafts.set(oldChat,draft.value);
     if(oldChat!==newChat){draft.value=newChat?(chatDrafts.get(newChat)||''):'';draft.style.height='auto'}
-    pendingSend=null;pendingUpload=null;resetMessagePicture();
+    pendingSend=null;pendingUpload=null;scrollPending=0;resetMessagePicture();
   }
   const before=activePopup()?.id;
   box=next;
@@ -71,6 +78,7 @@ async function tapRemote(p,button=1){
   if(viewOnly||busy||navigating||!connected()||!box){debugLog('tap-dropped',{busy,navigating,connected:connected()});return}
   const popup=activePopup();
   const oldHeader=popup?null:pictureHeader(),before=box.conversation;
+  const transition=!popup&&box.compactList&&button===1&&p.y>box.y+160?beginNavigationTransition(1):null;
   navigating=true;controls();message(button===3?'正在打开菜单…':'正在打开…');
   try{
     const data=popup?{target:'popup',window:popup.id,x:p.x,y:p.y,button}:{target:'main',window:box.id,conversation:box.conversation,x:p.x,y:p.y,button};
@@ -79,26 +87,29 @@ async function tapRemote(p,button=1){
     const result=await call('tap',data);
     debugLog('tap-result',{list:result.layout.compactList,conversation:result.layout.conversation,navigation:result.navigation,popups:result.layout.popups.length});
     acceptLayout(result.layout);
-    if(!popupActive()&&!popup&&(result.navigation||before!==box.conversation)&&oldHeader){
+    if(transition){
+      await finishNavigationTransition(transition,result.layout);
+    }else if(!popupActive()&&!popup&&(result.navigation||before!==box.conversation)&&oldHeader){
       visualPending=true;controls();
       await waitPictureChange(oldHeader,2500);
     }
     visualPending=false;message('');
     if(result.copied)showCopied(result.copied);
   }catch(e){debugLog('tap-error',{message:e.message});if(e.layout)acceptLayout(e.layout);visualPending=false;message(e.message,true)}
-  finally{navigating=false;controls();update()}
+  finally{cancelNavigationTransition(transition);navigating=false;controls();update()}
 }
 let scrollPending=0,scrollBusy=false,scrollPoint=null;
 // Scrolling WeChat itself goes through the server, batched so a fling does not flood it.
 function remoteScroll(amount,point){
   if(viewOnly||!box)return;
-  scrollPending+=amount;scrollPoint=point;
+  if(busy||navigating)return;
+  scrollPending=Math.max(-30,Math.min(30,scrollPending+amount));scrollPoint=point;
   if(!scrollBusy)flushScroll();
 }
 async function flushScroll(){
   if(!scrollPending||!scrollPoint)return;
   const amount=Math.max(-30,Math.min(30,scrollPending));scrollPending-=amount;scrollBusy=true;
-  try{await call('scroll',{x:scrollPoint.x,y:scrollPoint.y,amount})}catch{}
+  try{await call('scroll',{x:scrollPoint.x,y:scrollPoint.y,amount,conversation:box.conversation,popup:activePopup()?.id||null})}catch{}
   scrollBusy=false;if(scrollPending)flushScroll();
 }
 function applyView(){
@@ -185,13 +196,18 @@ async function setView(next){
   if(busy||navigating||viewOnly)return;
   pendingSend=null;
   if(popupActive()&&next!=='full')return;
-  if(box?.compact&&next==='list'){
+  if(box?.compact&&!box.compactList&&next==='list'){
     const before=box.conversation,oldHeader=pictureHeader();draft.blur();navigating=true;controls();
+    const transition=beginNavigationTransition(-1);
+    zoom=1;document.querySelector('#zoom').classList.remove('active');
+    screen.scrollTop=0;screen.scrollLeft=0;menu.classList.remove('open');
     try{
       acceptLayout((await call('view',{view:'list'})).layout);
-      if(before!==box.conversation&&oldHeader)await waitPictureChange(oldHeader,2500);
+      if(transition)await finishNavigationTransition(transition,box);
+      else if(before!==box.conversation&&oldHeader)await waitPictureChange(oldHeader,2500);
       message('');
-    }catch(e){if(e.layout)acceptLayout(e.layout);message(e.message,true);return}finally{navigating=false;controls()}
+    }catch(e){if(e.layout)acceptLayout(e.layout);message(e.message,true);return}finally{cancelNavigationTransition(transition);navigating=false;controls()}
+    return;
   }
   if(box?.compactList&&next==='chat')return;
   view=next;zoom=1;document.querySelector('#zoom').classList.remove('active');
@@ -235,21 +251,38 @@ send.onclick=async()=>{
   if(send.disabled)return;
   const text=draft.value,mode='enter',windowId=box.id,conversation=box.conversation;
   if(!pendingSend||pendingSend.text!==text||pendingSend.window!==windowId||pendingSend.conversation!==conversation)pendingSend={text,mode,window:windowId,conversation,requestId:crypto.randomUUID()};
-  const attempt=pendingSend;busy=true;message('');controls();
+  const attempt=pendingSend;busy=true;pendingSend=null;
+  // Detach the submitted text immediately; further typing belongs to the next message.
+  draft.value='';sizeDraft();message('发送中…');controls();
   debugLog('send',{conversation});
   try{
     const result=await call('send',attempt);
     debugLog('send-result',{ok:true});
-    if(draft.value===text){draft.value='';pendingSend=null;sizeDraft()}
+    if(sendRecoveries.get(sendDraftKey(attempt))?.requestId===attempt.requestId)sendRecoveries.delete(sendDraftKey(attempt));
+    message('');
     if(result.layout)acceptLayout(result.layout);
     resetMessagePicture(true);
-  }catch(e){debugLog('send-error',{message:e.message});if(e.layout)acceptLayout(e.layout);message(e.message,true)}
+  }catch(e){
+    debugLog('send-error',{message:e.message});if(e.layout)acceptLayout(e.layout);
+    if(sendDraftKey()===sendDraftKey(attempt)&&!draft.value){draft.value=attempt.text;pendingSend=attempt;sizeDraft()}
+    else sendRecoveries.set(sendDraftKey(attempt),attempt);
+    message(e.message,true);
+  }
   finally{busy=false;controls();update()}
 };
+document.querySelector('#restore-send')?.addEventListener('click',()=>{
+  const key=sendDraftKey(),attempt=sendRecoveries.get(key);if(!attempt)return;
+  if(draft.value)return message('输入框里已有新草稿，请先保存或处理新草稿，再恢复上一条',true);
+  draft.value=attempt.text;pendingSend=attempt;sendRecoveries.delete(key);sizeDraft();draft.focus();
+  message('已恢复上一条内容，请先核对聊天记录，避免重复发送',true);
+});
+document.querySelector('#dismiss-send')?.addEventListener('click',()=>{sendRecoveries.delete(sendDraftKey());controls();message('')});
 attach.onclick=()=>{if(!attach.disabled)picker.click()};
-picker.onchange=()=>{
-  const files=[...picker.files];picker.value='';
-  if(!files.length||!chatOpen())return;
+picker.onchange=()=>{const files=[...picker.files];picker.value='';prepareAttachments(files)};
+function prepareAttachments(files){
+  if(!files.length)return;
+  if(attach.disabled||!chatOpen()){message('请先打开聊天，再粘贴图片',true);return}
+  if(files.some(f=>f.size>95*1024*1024)){message('单个文件不能超过 95MB',true);return}
   const sheet=document.querySelector('#sheet'),list=sheet.querySelector('ul');list.replaceChildren();
   for(const file of files){
     const item=document.createElement('li');
@@ -262,7 +295,17 @@ picker.onchange=()=>{
   pendingUpload={files,window:box.id,conversation:box.conversation,ids:files.map(()=>crypto.randomUUID())};
   sheet.querySelector('#upload').textContent='发送 '+files.length+' 个';
   sheet.classList.add('open');draft.blur();
-};
+}
+// Safari exposes copied photos through the trusted paste event; no clipboard permission is needed.
+draft.addEventListener('paste',event=>{
+  const data=event.clipboardData;if(!data)return;
+  const files=[...(data.files||[])].filter(f=>f.type.startsWith('image/'));
+  if(!files.length)for(const item of data.items||[]){if(item.kind==='file'&&item.type.startsWith('image/')){const file=item.getAsFile();if(file)files.push(file)}}
+  if(!files.length)return;
+  event.preventDefault();
+  prepareAttachments(files.map((file,index)=>file.name?file:new File([file],`粘贴图片-${Date.now()}-${index}.${file.type==='image/jpeg'?'jpg':'png'}`,{type:file.type})));
+});
+draft.placeholder='输入消息，也可长按粘贴图片';
 document.querySelector('#upload-cancel').onclick=()=>{pendingUpload=null;document.querySelector('#sheet').classList.remove('open')};
 function uploadOne(file,id,target){
   return new Promise((resolve,reject)=>{
@@ -271,6 +314,8 @@ function uploadOne(file,id,target){
     request.setRequestHeader('X-Mobile-Control','1');request.setRequestHeader('Content-Type','application/octet-stream');
     request.setRequestHeader('X-File-Name',encodeURIComponent(file.name));request.setRequestHeader('X-Request-Id',id);
     request.setRequestHeader('X-Window',target.window);request.setRequestHeader('X-Conversation',encodeURIComponent(target.conversation));
+    request.timeout=120000;
+    request.ontimeout=()=>reject(Error('上传超时，请检查聊天记录后再试'));
     request.upload.onprogress=e=>{if(e.lengthComputable)target.progress(e.loaded/e.total)};
     request.onload=()=>{
       if(request.status===401){location.replace('/mobile/login');return reject(Error('请重新登录'))}
@@ -311,6 +356,14 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden)update(tru
 new ResizeObserver(()=>{fit();scheduleAdapt()}).observe(screen);
 frame.addEventListener('load',()=>{if(view==='full')setTimeout(()=>{fit();update(true)},1000)});
 // render.js and touch.js load after this file; start once every script is in place.
-document.addEventListener('DOMContentLoaded',()=>{setInterval(()=>{if(!document.hidden)update()},2500);viewport();controls();update()});
+document.addEventListener('DOMContentLoaded',()=>{setInterval(()=>{if(!document.hidden)update()},8000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
+
+// Optional LAN configuration is generated on the deployment host, never baked into the bundle.
+fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{
+  if(!config.url)return;
+  const url=new URL(config.url),link=document.querySelector('#lan-entry');
+  if(url.protocol!=='https:'||url.username||url.password||!link)return;
+  link.href=url.href;link.hidden=false;
+}).catch(()=>{});

@@ -1,3 +1,4 @@
+import socket
 import json, os, subprocess, threading, time, secrets, hmac, hashlib, re, ctypes, shutil, struct, zlib, io, base64
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, parse_qs
@@ -509,16 +510,29 @@ def mirror_state(key, crcs):
         return state['counter'], list(state['version'])
 
 
-def jpeg(image, motion=False):
+def jpeg(image, motion=False, slow=False):
     output = io.BytesIO()
     if motion:
         # While content moves, small frames keep the phone fluid; sharp strips follow once it settles.
-        scale = min(1, 480 / image.width)
+        scale = min(1, (360 if slow else 480) / image.width)
         image = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))), Image.BILINEAR)
-        image.save(output, 'JPEG', quality=60, subsampling=2)
+        image.save(output, 'JPEG', quality=50 if slow else 60, subsampling=2)
     else:
-        image.save(output, 'JPEG', quality=82, subsampling=0)
+        image.save(output, 'JPEG', quality=94, subsampling=0)
     return output.getvalue()
+
+
+def encode_strip(image, motion=False, slow=False, quality='clear'):
+    if quality == 'lossless' and not motion:
+        output = io.BytesIO()
+        image.save(output, 'PNG', compress_level=2)
+        return output.getvalue(), 'image/png'
+    return jpeg(image, motion if quality == 'adaptive' else False, slow), 'image/jpeg'
+
+
+def picture_quality(query):
+    quality = query.get('quality', ['clear'])[0]
+    return quality if quality in ('lossless', 'clear', 'adaptive') else 'clear'
 
 
 class PhonePicture:
@@ -579,22 +593,31 @@ def websocket_frame(payload, opcode=2):
 
 
 def websocket_read(stream):
-    """Read one client frame as (opcode, payload); None when the connection is gone."""
-    head = stream.read(2)
-    if len(head) < 2:
+    """Read a complete masked, unfragmented browser control frame with bounded memory."""
+    def exact(size):
+        chunks, left = [], size
+        while left:
+            part = stream.read(left)
+            if not part:
+                raise EOFError
+            chunks.append(part)
+            left -= len(part)
+        return b''.join(chunks)
+    try:
+        head = exact(2)
+        opcode, size = head[0] & 15, head[1] & 127
+        if head[0] & 0x70 or not head[0] & 0x80 or not head[1] & 0x80:
+            return None
+        if size == 126:
+            size = struct.unpack('>H', exact(2))[0]
+        elif size == 127:
+            size = struct.unpack('>Q', exact(8))[0]
+        if size > 4096 or opcode not in (1, 8, 9, 10) or opcode >= 8 and size > 125:
+            return None
+        mask, data = exact(4), exact(size)
+        return opcode, bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
+    except (EOFError, OSError, struct.error):
         return None
-    opcode, size = head[0] & 15, head[1] & 127
-    if size == 126:
-        size = struct.unpack('>H', stream.read(2))[0]
-    elif size == 127:
-        size = struct.unpack('>Q', stream.read(8))[0]
-    if size > 65536:
-        return None
-    mask = stream.read(4) if head[1] & 128 else b''
-    data = stream.read(size)
-    if mask:
-        data = bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
-    return opcode, data
 
 
 def strip_runs(indexes, height):
@@ -630,11 +653,15 @@ def check_request(request_id, fingerprint):
 
 def confirm_sent(current):
     # WeChat clears its input box once the message is accepted.
-    for pause in (.35, .45, .8, 1.2):
-        time.sleep(pause)
+    deadline = time.monotonic() + 3.5
+    while True:
+        if not validated_chat(layout(), {'window': current['id'], 'conversation': current['conversation']}):
+            return False
         if input_content(current) == '':
             return True
-    return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(.06)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -658,6 +685,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def frame(self, query):
         target = query.get('target', ['main'])[0]
+        quality = picture_quality(query)
         try:
             since = int(query.get('since', ['-1'])[0])
         except ValueError:
@@ -680,38 +708,44 @@ class Handler(BaseHTTPRequestHandler):
             changed = [i for i, version in enumerate(versions) if full or version > since]
             if changed or time.monotonic() > deadline:
                 image = Image.frombuffer('RGB', (width, height), data, 'raw', 'BGRX', stride, 1)
-                strips, blobs = [], []
+                strips, blobs, types = [], [], []
                 for i in changed:
                     if strips and strips[-1][0] + strips[-1][1] == i * BAND:
                         strips[-1][1] = min(image.height, (i + 1) * BAND) - strips[-1][0]
                     else:
                         strips.append([i * BAND, min(image.height, (i + 1) * BAND) - i * BAND])
                 for top, height in strips:
-                    blobs.append(jpeg(image.crop((0, top, image.width, top + height))))
+                    blob, mime = encode_strip(image.crop((0, top, image.width, top + height)), quality=quality)
+                    blobs.append(blob); types.append(mime)
                 return self.binary({'key': key, 'rect': rect, 'version': counter, 'full': full,
-                                    'strips': [s + [len(b)] for s, b in zip(strips, blobs)], 'layout': current}, blobs)
+                                    'strips': [s + [len(b), 0, image.width, mime] for s, b, mime in zip(strips, blobs, types)], 'layout': current}, blobs)
             time.sleep(.12)
             if time.monotonic() - checked > .4:
                 current, checked = layout(), time.monotonic()
 
     def websocket(self):
-        """Push the phone picture over a WebSocket.
-
-        Cloudflare's tunnel stalls long HTTP responses after about 128 KB but passes WebSockets on
-        directly. The phone acknowledges every message; with at most two unacknowledged messages
-        in flight, changes made meanwhile merge into the next message instead of queueing up.
-        """
+        # nginx authenticates the handshake; recheck cookies so session revocation also closes streams.
         key = self.headers.get('Sec-WebSocket-Key', '')
         origin = urlsplit(self.headers.get('Origin', '')).netloc
-        if self.headers.get('Upgrade', '').lower() != 'websocket' or not key or origin != self.headers.get('Host'):
+        try:
+            valid_key = len(base64.b64decode(key, validate=True)) == 16
+        except ValueError:
+            valid_key = False
+        if not authenticated(self.headers):
+            return self.reply(401, error='请重新登录')
+        if (self.headers.get('Upgrade', '').lower() != 'websocket' or not valid_key
+                or origin != self.headers.get('Host') or self.headers.get('Sec-WebSocket-Version') != '13'):
             return self.reply(400, error='请从手机界面连接')
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.connection.settimeout(35)
         self.send_response(101)
         self.send_header('Upgrade', 'websocket')
         self.send_header('Connection', 'Upgrade')
         self.send_header('Sec-WebSocket-Accept', base64.b64encode(hashlib.sha1((key + WEBSOCKET_GUID).encode()).digest()).decode())
         self.end_headers()
         self.close_connection = True
-        state, write_lock = {'open': True, 'acked': 0, 'sent': 0, 'heard': time.monotonic()}, threading.Lock()
+        state = {'open': True, 'acked': 0, 'sent': 0, 'heard': time.monotonic(), 'sent_at': 0, 'latency': .1}
+        write_lock = threading.Lock()
 
         def write(payload, opcode=2):
             with write_lock:
@@ -719,42 +753,51 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         def listen():
-            while state['open']:
-                try:
+            try:
+                while state['open']:
                     frame = websocket_read(self.rfile)
-                except Exception:
-                    frame = None
-                if not frame or frame[0] == 8:
-                    break
-                state['heard'] = time.monotonic()
-                if frame[0] == 1 and frame[1].startswith(b'ack '):
-                    state['acked'] = max(state['acked'], int(frame[1][4:] or 0))
-                elif frame[0] == 9:
-                    try:
-                        write(frame[1], 10)
-                    except OSError:
+                    if not frame or frame[0] == 8:
                         break
-            state['open'] = False
+                    state['heard'] = time.monotonic()
+                    if frame[0] == 1 and re.fullmatch(rb'ack [0-9]{1,12}', frame[1]):
+                        ack = int(frame[1][4:])
+                        if state['acked'] < ack == state['sent']:
+                            elapsed = time.monotonic() - state['sent_at']
+                            state['latency'] = .75 * state['latency'] + .25 * elapsed
+                            state['acked'] = ack
+                    elif frame[0] == 9:
+                        write(frame[1], 10)
+            except OSError:
+                pass
+            finally:
+                state['open'] = False
 
         threading.Thread(target=listen, daemon=True).start()
 
         def send(message):
             state['sent'] += 1
+            state['sent_at'] = time.monotonic()
             write(message)
 
         def ready():
-            if not state['open'] or time.monotonic() - state['heard'] > 30:
+            if not state['open'] or time.monotonic() - state['heard'] > 25 or not authenticated(self.headers):
                 raise BrokenPipeError
-            return state['sent'] - state['acked'] < 2
+            # At most one picture in flight. Intermediate desktop states are never queued.
+            return state['sent'] == state['acked']
 
         try:
-            self.push_frames(send, ready, lambda: state['sent'] + 1)
+            self.push_frames(send, ready, lambda: state['sent'] + 1, lambda: state['latency'], picture_quality(parse_qs(urlsplit(self.path).query)))
         finally:
             state['open'] = False
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
-    def push_frames(self, send, ready, sequence):
+    def push_frames(self, send, ready, sequence, latency=lambda: .1, quality='clear'):
+        picture_profile = quality
         key, phone = None, None
-        current, checked, shown_layout = None, 0, None
+        current, checked, shown_layout, shown_conversation = None, 0, None, None
         last_change, last_send, previous_changed = 0, 0, False
         while True:
             now = time.monotonic()
@@ -782,7 +825,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = [zlib.crc32(pixels[i * stride:i * stride + body]) for i in range(height)]
                     edges = [zlib.crc32(pixels[i * stride + body:i * stride + width * 4]) for i in range(height)]
                     new_key = name + ':' + ','.join(map(str, rect))
-                    full = new_key != key
+                    full = new_key != key or current['conversation'] != shown_conversation
                     if full:
                         key, phone = new_key, PhonePicture(height)
                     changed = [i for i in range(height) if rows[i] != phone.rows[i]]
@@ -797,11 +840,11 @@ class Handler(BaseHTTPRequestHandler):
                     changed_strips = sorted({i // BAND for i in changed})
                     changed_set = set(changed_strips)
                     refine = [s for s in range(count) if s not in changed_set and any(phone.low[s * BAND:(s + 1) * BAND])
-                              and now - max(phone.stamp[s * BAND:(s + 1) * BAND]) > .3]
+                              and now - max(phone.stamp[s * BAND:(s + 1) * BAND]) > max(.3, min(1.2, latency()))]
                     # Sustained or widespread change is motion: scrolling, animations, list reshuffles.
                     moving = bool(changed_strips or moves) and not full
-                    # A new screen (list to chat, a menu) also arrives light first and sharpens a moment later.
-                    motion = full or moving and (previous_changed or bool(moves) or len(changed_strips) * 3 > count)
+                    # A new screen arrives at native resolution; adaptive motion applies to later updates.
+                    motion = not full and moving and (previous_changed or bool(moves) or len(changed_strips) * 3 > count)
                     main = max(1, width - EDGE)
                     edge_strips = [] if full else sorted({i // BAND for i in range(height) if edges[i] != phone.edge[i]})
                     if moving or edge_strips:
@@ -823,26 +866,28 @@ class Handler(BaseHTTPRequestHandler):
                         strips, span = [], width if full else main
                         for group, quality in ((changed_strips, motion), (refine, False)):
                             for top, size in strip_runs(group, height):
-                                blob = jpeg(image.crop((0, top, span, top + size)), quality)
-                                strips.append([top, size, len(blob), 0, span])
+                                blob, mime = encode_strip(image.crop((0, top, span, top + size)), quality, latency() > .4, picture_profile)
+                                strips.append([top, size, len(blob), 0, span, mime])
                                 blobs.append(blob)
                         for top, size in strip_runs(edge_strips, height):
-                            blob = jpeg(image.crop((main, top, width, top + size)))
-                            strips.append([top, size, len(blob), main, width - main])
+                            blob, mime = encode_strip(image.crop((main, top, width, top + size)), quality=picture_profile)
+                            strips.append([top, size, len(blob), main, width - main, mime])
                             blobs.append(blob)
                         header.update(key=key, rect=rect, full=full, strips=strips, moves=moves, span=main)
                 if header:
                     header['seq'] = sequence()
                     head = json.dumps(header, ensure_ascii=False).encode()
                     send(struct.pack('>II', len(head), sum(map(len, blobs))) + head + b''.join(blobs))
-                    last_send, shown_layout = now, snapshot
+                    last_send, shown_layout, shown_conversation = now, snapshot, current['conversation']
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
             except Exception:
                 time.sleep(.5)
-                current = None
+                # Capture/encoding may have changed the delta baseline before failing.
+                # Resend a complete picture rather than depending on an unsent change.
+                current, key, phone, shown_layout, shown_conversation = None, None, None, None, None
                 continue
-            time.sleep(.05 if now - last_change < 1.5 else .15)
+            time.sleep(max(.04, min(.15, latency() * .2)) if now - last_change < 1.5 else .25)
 
     def binary(self, header, blobs):
         head = json.dumps(header, ensure_ascii=False).encode()
@@ -963,7 +1008,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(409, error='微信焦点已变化，请重试')
         set_clipboard(content)
         run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')
-        time.sleep(.20)
         if input_content(current) != content:
             return self.reply(409, error='微信输入未完成，内容已保留，请再点发送')
         if not validated_chat(layout(), payload):
@@ -1135,6 +1179,10 @@ class Handler(BaseHTTPRequestHandler):
         if not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y, amount)) or not 0 < abs(amount) <= 30:
             return self.reply(400, error='请求格式错误')
         current = layout()
+        expected = payload.get('conversation')
+        popup = current['popups'][0]['id'] if current['popups'] else None
+        if expected is not None and (expected != current['conversation'] or payload.get('popup') != popup):
+            return self.reply(409, error='画面已变化，请重新滑动', layout=current)
         area = current['popups'][0] if current['popups'] else current
         if not (area['x'] <= x < area['x'] + area['width'] and area['y'] <= y < area['y'] + area['height']):
             return self.reply(400, error='滚动位置无效')

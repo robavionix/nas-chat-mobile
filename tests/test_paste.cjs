@@ -1,0 +1,12 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync('mobile/web/app.js','utf8');
+const code=source.slice(source.indexOf("draft.addEventListener('paste'"),source.indexOf("document.querySelector('#upload-cancel').onclick="));
+let handler,received,prevented=0;
+const context={draft:{addEventListener:(name,fn)=>handler=fn},prepareAttachments:files=>received=files,File:class{},Date};
+vm.runInNewContext(code,context);
+const photo={name:'photo.png',type:'image/png',size:10};
+handler({clipboardData:{files:[photo],items:[{kind:'file',type:'image/png',getAsFile:()=>photo}]},preventDefault:()=>prevented++});
+assert.equal(received.length,1);assert.equal(prevented,1);
+received=null;handler({clipboardData:{files:[],items:[{kind:'file',type:'image/png',getAsFile:()=>photo}]},preventDefault:()=>prevented++});assert.equal(received[0],photo);
+received=null;handler({clipboardData:{files:[],items:[{kind:'string',type:'text/plain'}]},preventDefault:()=>{throw Error('text prevented')}});assert.equal(received,null);
+console.log('PASS image paste, items fallback, no duplicate, text unchanged; no send called');

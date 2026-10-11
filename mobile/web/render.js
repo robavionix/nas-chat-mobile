@@ -7,7 +7,8 @@ const headerCanvas=document.createElement('canvas'),headerContext=headerCanvas.g
 const sampleCanvas=document.createElement('canvas'),sampleContext=sampleCanvas.getContext('2d',{willReadFrequently:true});
 const shiftCanvas=document.createElement('canvas'),shiftContext=shiftCanvas.getContext('2d',{alpha:false});
 headerCanvas.width=64;headerCanvas.height=16;
-const mirror={key:null,rect:null,version:-1,alive:0,ready:false,changed:0,controller:null,target:null,mode:'poll',failures:0,streamed:false};
+const mirror={key:null,rect:null,layout:null,version:-1,alive:0,ready:false,changed:0,controller:null,target:null,mode:'websocket',failures:0,streamed:false,socket:null,epoch:0,retryAt:0,frames:0,bytes:0};
+let boundsVersion=-1;
 let panes=null,boundsTime=0,contentBottom=null,localOffset=0,lastPaneView=null,waitingHeader=null,renderDirty=true,followUntil=0,paintedVersion=-1;
 // After sending or switching chats, keep following the newest message for a moment.
 function resetMessagePicture(keepBottom=false){localOffset=0;if(!keepBottom)contentBottom=null;boundsTime=0;renderDirty=true;followUntil=performance.now()+3000}
@@ -22,11 +23,13 @@ function drawDesktop(context,x,y,width,height,dx,dy,dw,dh){
   return true;
 }
 // Strips are decoded first and drawn together, so a frame never shows half old and half new content.
-async function applyMessage(header,bytes){
-  if(header.layout)acceptLayout(header.layout);
-  if(!header.key){mirror.key=null;mirror.ready=false;return}
+async function applyMessage(header,bytes,valid=()=>true){
+  if(!valid())return;
+  if(!header.key){if(header.layout)acceptLayout(header.layout);mirror.key=null;mirror.ready=false;return}
   let offset=0;
-  const images=await Promise.all(header.strips.map(([,,size])=>decodeImage(new Blob([bytes.subarray(offset,offset+=size)],{type:'image/jpeg'}))));
+  const images=await Promise.all(header.strips.map(([,,size,,,mime='image/jpeg'])=>decodeImage(new Blob([bytes.subarray(offset,offset+=size)],{type:mime}))));
+  if(!valid()){images.forEach(image=>image.close?.());return}
+  if(header.layout)acceptLayout(header.layout);
   if(header.full||header.key!==mirror.key){
     const [,,w,h]=header.rect;
     if(mirrorCanvas.width!==w||mirrorCanvas.height!==h){mirrorCanvas.width=w;mirrorCanvas.height=h}
@@ -43,72 +46,122 @@ async function applyMessage(header,bytes){
   header.strips.forEach(([top,height,,left=0,width=mirrorCanvas.width],i)=>{mirrorContext.drawImage(images[i],left,top,width,height);images[i].close?.()});
   if(header.strips.length||header.moves?.length){mirror.changed=performance.now();mirror.version++;renderDirty=true}
   mirror.key=header.key;mirror.rect=header.rect;mirror.ready=true;
+  if(header.layout)mirror.layout=header.layout;
 }
-async function applyFrame(buffer){
+async function applyFrame(buffer,valid=()=>true){
   const length=new DataView(buffer).getUint32(0),header=JSON.parse(new TextDecoder().decode(new Uint8Array(buffer,4,length)));
-  await applyMessage(header,new Uint8Array(buffer,4+length));
-  mirror.since=header.version;
+  await applyMessage(header,new Uint8Array(buffer,4+length),valid);
+  if(valid())mirror.since=header.version;
 }
-// One long response carries every frame; each message is [header length][strip bytes][header][strips].
-async function streamMirror(){
-  const controller=new AbortController();mirror.controller=controller;mirror.target='stream';
-  let received=false;
-  const watchdog=setTimeout(()=>{if(!received)controller.abort()},6000);
-  try{
-    const response=await fetch('/mobile-api/stream',{cache:'no-store',signal:controller.signal});
-    if(response.status===401){location.replace('/mobile/login');return 'stop'}
-    if(!response.ok||!response.body)throw Error('stream '+response.status);
-    const reader=response.body.getReader();
-    let buffer=new Uint8Array(0);
-    for(;;){
-      const {value,done}=await reader.read();if(done)return;
-      const joined=new Uint8Array(buffer.length+value.length);joined.set(buffer);joined.set(value,buffer.length);buffer=joined;
-      while(buffer.length>=8){
-        const sizes=new DataView(buffer.buffer,buffer.byteOffset,8),headLength=sizes.getUint32(0),total=8+headLength+sizes.getUint32(4);
-        if(buffer.length<total)break;
-        const header=JSON.parse(new TextDecoder().decode(buffer.subarray(8,8+headLength))),strips=buffer.subarray(8+headLength,total);
-        buffer=buffer.slice(total);
-        received=true;mirror.streamed=true;mirror.failures=0;mirror.alive=performance.now();
-        await applyMessage(header,strips);
-      }
+// Acknowledge only after the decoded picture has reached the next paint opportunity.
+// The server sends one picture at a time; dependent deltas must be applied in order.
+function transportStatus(){
+  const label=document.querySelector('#connection-info');
+  if(label){
+    label.textContent=(/^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname)?'家里直连':'公网连接')+' · '+(mirror.mode==='websocket'?'实时推送':'兼容模式');
+    label.dataset.transport=mirror.mode;
+  }
+}
+function frameQuality(){
+  try{if(localStorage.getItem('nas-chat-mobile-quality')==='adaptive')return 'adaptive'}catch{}
+  return /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname)?'lossless':'clear';
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  const button=document.querySelector('#quality');if(!button)return;
+  const label=()=>button.textContent='画质：'+(frameQuality()==='adaptive'?'流畅优先':'清晰优先');label();
+  button.onclick=()=>{
+    const next=frameQuality()==='adaptive'?'clear':'adaptive';
+    try{localStorage.setItem('nas-chat-mobile-quality',next)}catch{return message('浏览器无法保存画质设置',true)}
+    label();resetMirror();message(next==='adaptive'?'已切换流畅优先':'已切换清晰优先');
+  };
+});
+async function socketMirror(){
+  const epoch=mirror.epoch,socket=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/mobile-api/ws?quality='+frameQuality());
+  socket.binaryType='arraybuffer';mirror.socket=socket;mirror.target='websocket';
+  const valid=()=>epoch===mirror.epoch&&!document.hidden&&view!=='full';
+  let received=false,last=performance.now(),busy=false,settled=false;
+  return new Promise((resolve,reject)=>{
+    function finish(error){
+      if(settled)return;settled=true;clearInterval(watchdog);
+      if(mirror.socket===socket)mirror.socket=null;
+      socket.close();error?reject(error):resolve();
     }
-  }finally{clearTimeout(watchdog)}
+    const watchdog=setInterval(()=>{
+      if(!valid())return finish();
+      if(performance.now()-last>(received?15000:5000))return finish(Error('画面连接超时'));
+      if(socket.readyState===1)socket.send('ping');
+    },3000);
+    socket.onmessage=async event=>{
+      if(!valid())return finish();
+      if(busy)return finish(Error('画面队列不同步'));
+      busy=true;
+      try{
+        const buffer=event.data;
+        if(!(buffer instanceof ArrayBuffer)||buffer.byteLength<8)throw Error('画面格式无效');
+        const lengths=new DataView(buffer),hl=lengths.getUint32(0),bl=lengths.getUint32(4);
+        if(hl>65536||bl>12*1024*1024||8+hl+bl!==buffer.byteLength)throw Error('画面长度无效');
+        const header=JSON.parse(new TextDecoder().decode(new Uint8Array(buffer,8,hl)));
+        if(!Number.isSafeInteger(header.seq)||!Array.isArray(header.strips))throw Error('画面序号无效');
+        await applyMessage(header,new Uint8Array(buffer,8+hl,bl),valid);
+        if(!valid())return finish();
+        mirror.alive=last=performance.now();mirror.streamed=true;
+        mirror.frames++;mirror.bytes+=buffer.byteLength;
+        if(!received)transportStatus();
+        received=true;mirror.failures=0;
+        controls();
+        await new Promise(requestAnimationFrame);
+        if(valid()&&socket.readyState===1)socket.send('ack '+header.seq);
+      }catch(error){finish(error)}finally{busy=false}
+    };
+    socket.onerror=()=>finish(Error('实时连接不可用'));
+    socket.onclose=()=>finish(valid()?Error('实时连接已断开'):null);
+  });
 }
-function stopMirror(){mirror.controller?.abort()}
+function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close()}
+
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMirror()});
 function decodeImage(blob){
-  if(window.createImageBitmap)return createImageBitmap(blob);
-  return new Promise((resolve,reject)=>{const url=URL.createObjectURL(blob),img=new Image();img.onload=()=>{URL.revokeObjectURL(url);resolve(img)};img.onerror=reject;img.src=url});
+  if(window.createImageBitmap)return createImageBitmap(blob).catch(()=>decodeImageElement(blob));
+  return decodeImageElement(blob);
+}
+function decodeImageElement(blob){
+  return new Promise((resolve,reject)=>{const url=URL.createObjectURL(blob),img=new Image();img.onload=()=>{URL.revokeObjectURL(url);resolve(img)};img.onerror=()=>{URL.revokeObjectURL(url);reject(Error('图片解码失败'))};img.src=url});
 }
 async function mirrorLoop(){
   for(;;){
     if(document.hidden||view==='full'||!box){await new Promise(r=>setTimeout(r,300));continue}
-    if(mirror.mode==='stream'){
-      try{if(await streamMirror()==='stop')return}catch{}
-      if(document.hidden||view==='full')continue;
-      // Some networks buffer long responses; after repeated silence fall back to asking for each frame.
-      if(++mirror.failures>=3&&!mirror.streamed)mirror.mode='poll';
-      await new Promise(r=>setTimeout(r,Math.min(3000,250*mirror.failures)));
+    if(mirror.mode==='poll'&&performance.now()>mirror.retryAt){mirror.mode='websocket';transportStatus()}
+    if(mirror.mode==='websocket'){
+      try{await socketMirror()}catch{
+        if(!document.hidden&&view!=='full'){
+          mirror.mode='poll';mirror.retryAt=performance.now()+60000;
+          mirror.key=null;mirror.since=-1;
+          // Keep the last picture visible while the compatible transport fetches a fresh frame.
+          transportStatus();
+        }
+      }
       continue;
     }
-    const target=mirrorTarget(),controller=new AbortController();
+    const target=mirrorTarget(),controller=new AbortController(),epoch=mirror.epoch;
     mirror.controller=controller;mirror.target=target;
     const since=mirror.key&&mirror.since!==undefined?mirror.since:-1;
     const timer=setTimeout(()=>controller.abort(),15000);
     try{
-      const response=await fetch('/mobile-api/frame?target='+target+'&since='+since+'&key='+encodeURIComponent(mirror.key||''),{cache:'no-store',signal:controller.signal});
+      const response=await fetch('/mobile-api/frame?target='+target+'&since='+since+'&key='+encodeURIComponent(mirror.key||'')+'&quality='+frameQuality(),{cache:'no-store',signal:controller.signal});
       if(response.status===401){location.replace('/mobile/login');return}
       if(!response.ok)throw Error('frame '+response.status);
-      await applyFrame(await response.arrayBuffer());
+      const buffer=await response.arrayBuffer();
+      if(controller.signal.aborted||mirror.target!==target)continue;
+      await applyFrame(buffer,()=>!controller.signal.aborted&&epoch===mirror.epoch);
       mirror.alive=performance.now();
       if(!mirror.key)await new Promise(r=>setTimeout(r,150));
-    }catch(e){if(!controller.signal.aborted||mirror.target===target)await new Promise(r=>setTimeout(r,700))}
+    }catch(e){if(!controller.signal.aborted)await new Promise(r=>setTimeout(r,700))}
     finally{clearTimeout(timer)}
   }
 }
 // A different target (for example a menu that just opened) must not wait for the old long poll.
 function retargetMirror(){if(mirror.mode==='poll'&&mirror.controller&&mirror.target!==mirrorTarget()){mirror.target=null;mirror.controller.abort()}}
-function resetMirror(){mirror.key=null;mirror.ready=false;mirror.version=-1;mirror.controller?.abort();renderDirty=true}
+function resetMirror(){stopMirror();mirror.key=null;mirror.since=-1;mirror.version=-1;mirror.mode='websocket';mirror.retryAt=0;renderDirty=true;transportStatus()}
 function pictureHeader(){
   if(!box||!mirror.ready)return null;
   try{
@@ -165,9 +218,10 @@ function fitMobilePicture(){
   stage.style.width=panes.width+'px';stage.style.height=panes.height+'px';
   stage.style.marginTop=popup?Math.max(0,(screen.clientHeight-panes.height)/2)+'px':'';
   stage.style.marginLeft=popup||!box.chatReady?Math.max(0,(screen.clientWidth-panes.width)/2)+'px':'';
-  const dpr=Math.min(2,devicePixelRatio||1),width=Math.round(panes.width*dpr),height=Math.round(panes.height*dpr);
+  const dpr=Math.min(3,devicePixelRatio||1),width=Math.round(panes.width*dpr),height=Math.round(panes.height*dpr);
   if(mobileCanvas.width!==width||mobileCanvas.height!==height){mobileCanvas.width=width;mobileCanvas.height=height}
   mobileCanvas.style.width=panes.width+'px';mobileCanvas.style.height=panes.height+'px';
+  if(typeof navigationLayoutChanged==='function')navigationLayoutChanged();
   retargetMirror();
 }
 function localScrolling(){return panes&&(view==='chat'||view==='list')&&!popupActive()&&box?.chatReady}
@@ -199,8 +253,9 @@ function scrollLocal(delta){
 function findContentBottom(now){
   if(view!=='chat'||popupActive()||!box.chatReady||box.compactList||!mirror.key?.startsWith('main:'))return;
   const following=now<followUntil;
+  if(!following&&boundsVersion===mirror.version&&contentBottom!==null)return;
   if(now-boundsTime<(following?120:400))return;
-  boundsTime=now;
+  boundsTime=now;boundsVersion=mirror.version;
   const top=box.y+138,bottom=box.y+box.height-258,height=bottom-top;
   if(height<=0)return;
   // Determine only the bottom of the visible message area, without OCR or storing pixels.
@@ -224,8 +279,11 @@ function findContentBottom(now){
 function paintMobile(now){
   requestAnimationFrame(paintMobile);
   if(!box||view==='full'||document.hidden)return;
+  if(typeof navigationAnimationRunning==='function'&&navigationAnimationRunning())return;
   const waiting=document.querySelector('#waiting');
   if(!mirror.ready){waiting.textContent='正在加载画面…';waiting.classList.remove('hidden');return}
+  // An HTTP layout can beat its screenshot. Never crop the old chat using the new layout.
+  if(mirror.layout&&(mirror.layout.conversation!==box.conversation||mirror.layout.compactList!==box.compactList||mirror.layout.popups?.[0]?.id!==box.popups?.[0]?.id))return;
   if(visualPending){
     if(waitingHeader&&headerChanged(waitingHeader)){visualPending=false;waitingHeader=null;controls()}
   }
@@ -234,10 +292,12 @@ function paintMobile(now){
   try{
     const dpr=mobileCanvas.width/panes.width;
     pictureContext.setTransform(dpr,0,0,dpr,0,0);
+    pictureContext.imageSmoothingQuality='high';
     pictureContext.fillStyle='#fafafa';pictureContext.fillRect(0,0,panes.width,panes.height);
     for(const part of panes.sections)drawDesktop(pictureContext,part.x,part.y,part.width,part.height,0,part.dy,panes.width,part.height*panes.scale);
     renderDirty=false;paintedVersion=mirror.version;
     waiting.classList.add('hidden');
+    if(typeof navigationPicturePainted==='function')navigationPicturePainted();
   }catch{}
 }
 requestAnimationFrame(paintMobile);

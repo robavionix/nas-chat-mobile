@@ -5,12 +5,12 @@ from pathlib import Path
 import re
 p=Path('/etc/nginx/sites-enabled/default')
 s=p.read_text()
-if '# mobile-session-v5' not in s:
+if '# mobile-session-v10' not in s:
     s=re.sub(r'  # mobile-wechat\n.*?(?=  location / \{)', '', s, flags=re.S)
     s=re.sub(r'  auth_basic\s+"Login";\n', '', s)
     s=re.sub(r'  auth_basic_user_file\s+/etc/nginx/.htpasswd;\n', '', s)
-    block='''  # mobile-wechat
-  # mobile-session-v5
+    block=r'''  # mobile-wechat
+  # mobile-session-v10
   absolute_redirect off;
   auth_request /_mobile_auth;
   location = /_mobile_auth {
@@ -37,10 +37,51 @@ if '# mobile-session-v5' not in s:
     client_max_body_size 32k;
   }
   location = / { return 302 /mobile/; }
+  location = /apple-touch-icon.png {
+    auth_request off;
+    alias /config/mobile/web/apple-touch-icon.png;
+    add_header Cache-Control "no-cache" always;
+  }
+  location = /apple-touch-icon-precomposed.png {
+    auth_request off;
+    alias /config/mobile/web/apple-touch-icon.png;
+    add_header Cache-Control "no-cache" always;
+  }
+  location = /favicon.ico {
+    auth_request off;
+    alias /config/mobile/web/favicon.png;
+    types { }
+    default_type image/png;
+    add_header Cache-Control "no-cache" always;
+  }
+  location = /mobile/lan-config.json {
+    auth_request off;
+    alias /config/mobile/web/lan-config.json;
+    default_type application/json;
+    add_header Cache-Control "no-store" always;
+  }
   location ~ ^/mobile/((apple-touch-icon|favicon|icon|icon-192)\.png|manifest\.json)$ {
     auth_request off;
     alias /config/mobile/web/$1;
     add_header Cache-Control "public, max-age=86400" always;
+  }
+  location = /mobile/lan-setup.html {
+    auth_request off;
+    alias /config/mobile/web/lan-setup.html;
+    default_type text/html;
+    add_header Cache-Control "no-store" always;
+  }
+  location = /mobile/lan-root.cer {
+    auth_request off;
+    alias /config/mobile/web/lan-root.cer;
+    types { }
+    default_type application/x-x509-ca-cert;
+  }
+  location = /mobile/lan-chat.mobileconfig {
+    auth_request off;
+    alias /config/mobile/web/lan-chat.mobileconfig;
+    types { }
+    default_type application/x-apple-aspen-config;
   }
   location /mobile/ {
     alias /config/mobile/web/;
@@ -55,6 +96,23 @@ if '# mobile-session-v5' not in s:
     client_body_timeout 120s;
     proxy_read_timeout 120s;
   }
+  location = /mobile-api/ws {
+    proxy_pass http://127.0.0.1:8089/ws;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $http_host;
+    proxy_set_header Origin $http_origin;
+    proxy_buffering off;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
+  }
+  location = /mobile-api/stream {
+    proxy_pass http://127.0.0.1:8089/stream;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    gzip off;
+  }
   location /mobile-api/ {
     proxy_pass http://127.0.0.1:8089/;
     client_max_body_size 32k;
@@ -67,6 +125,6 @@ PY
 mkdir -p /run/wechat-mobile-service
 cp /custom-services.d/mobile/run /run/wechat-mobile-service/run
 chmod 755 /run/wechat-mobile-service/run
-if [ ! -e /run/wechat-mobile-service/supervise/lock ]; then
+if ! s6-svok /run/wechat-mobile-service >/dev/null 2>&1; then
   nohup s6-supervise /run/wechat-mobile-service >/dev/null 2>&1 &
 fi

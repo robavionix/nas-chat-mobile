@@ -3,6 +3,9 @@
   const LONG_PRESS = 480;
   let gesture = null, pinch = null, carry = 0, inertia = 0, pressTimer = 0;
   const fingers = new Map();
+  let pendingDelta=0,scrollFrame=0;
+  function flushLocal(){cancelAnimationFrame(scrollFrame);scrollFrame=0;const delta=pendingDelta;pendingDelta=0;if(delta)wheel(delta)}
+  function queueLocal(delta){pendingDelta+=delta;if(!scrollFrame)scrollFrame=requestAnimationFrame(flushLocal)}
   function stop(reset=true) { cancelAnimationFrame(inertia); inertia = 0; if(reset) carry = 0; }
   // The touch layer only exists over the phone picture, whose crop is described by its panes.
   function position(x, y) {
@@ -34,6 +37,7 @@
   function coast(velocity) {
     let v = Math.max(-4, Math.min(4, velocity)), last = performance.now(), start = last;
     function tick(now) {
+      if(busy||navigating){stop();return}
       const dt = Math.min(32, now-last); last = now;
       v *= Math.pow(.95, dt/16);
       try { wheel(-v*dt); } catch(e) { message(e.message,true); return; }
@@ -55,6 +59,7 @@
   layer.addEventListener('pointerdown', e => {
     if (e.pointerType==='mouse' && e.button!==0) return;
     e.preventDefault(); stop();
+    if(busy||navigating)return;
     fingers.set(e.pointerId,{x:e.clientX,y:e.clientY});
     layer.setPointerCapture(e.pointerId);
     if (fingers.size===2) {
@@ -86,7 +91,7 @@
     if (!gesture.moved && Math.hypot(e.clientX-gesture.x,e.clientY-gesture.y)>8) { gesture.moved=true; cancelPress(); }
     if (gesture.moved && !gesture.pressed) {
       if (screen.scrollWidth>screen.clientWidth+1) screen.scrollLeft-=dx;
-      try { wheel(-dy); } catch(err) { message(err.message,true); }
+      try { queueLocal(-dy); } catch(err) { message(err.message,true); }
       gesture.velocity=.5*gesture.velocity+.5*(dy/dt);
     }
     gesture.lastX=e.clientX; gesture.lastY=e.clientY; gesture.lastTime=now;
@@ -95,7 +100,7 @@
     fingers.delete(e.pointerId);
     if (pinch) { if(!fingers.size) pinch=null; return; }
     if (!gesture || gesture.id!==e.pointerId) return;
-    const g=gesture; gesture=null; e.preventDefault(); cancelPress();
+    const g=gesture; gesture=null; e.preventDefault(); cancelPress();flushLocal();
     if (cancelled || g.pressed) { stop(); return; }
     if (g.moved) { if(performance.now()-g.lastTime<100) coast(g.velocity); return; }
     if (viewOnly) return;
@@ -113,5 +118,6 @@
   },{passive:false});
   layer.addEventListener('contextmenu',e=>e.preventDefault());
   window.addEventListener('resize',()=>stop());
-  window.addEventListener('pagehide',()=>stop());
+  window.addEventListener('nas-navigation-start',()=>{stop();cancelAnimationFrame(scrollFrame);scrollFrame=0;pendingDelta=0;cancelPress();gesture=null;pinch=null;fingers.clear()});
+  window.addEventListener('pagehide',()=>{stop();cancelAnimationFrame(scrollFrame);scrollFrame=0;pendingDelta=0});
 })();

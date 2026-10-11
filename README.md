@@ -1,5 +1,7 @@
 # nas-chat-mobile
 
+当前版本：**0.2.0** · [更新记录](CHANGELOG.md)
+
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
 它配合 [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) 镜像工作：该镜像在容器里通过网页远程桌面运行 Linux 版客户端。本项目在同一个容器里加一层手机视图：竖屏布局、会话列表与聊天切换、触控点击 / 长按 / 滑动 / 双指缩放、文字与文件发送，并可添加到 iPhone 主屏幕。
@@ -9,12 +11,15 @@
 ## 功能
 
 - **手机竖屏视图**：会话列表和聊天两种视图，标题栏固定，内容在手机本地平滑滚动；支持双指缩放和「Aa」放大。
+- **会话过渡**：新画面绘制完成后才做 220 毫秒匀速滑动；独立快照覆盖画布改尺寸的过程，返回列表时也覆盖增高的区域，支持系统减少动态效果设置。
 - **触控操作**：点击、长按（打开右键菜单，可复制、转发、引用、撤回等）、滑动和惯性滚动。复制的内容可以一键复制到手机剪贴板。
-- **发送文字**：通过剪贴板粘贴，并核对输入框内容；发送请求带幂等 ID，避免重复发送；会话变化时拒绝发送，避免发错对象。
-- **发送照片和文件**：从手机选择后先显示当前聊天标题供核对，单个文件最大 95 MB。
+- **发送文字**：点击发送立即清空已提交的文字，随后输入下一条不会被旧请求清空；未确认的发送按原会话保留。后端核对输入内容与聊天对象，请求带幂等 ID，避免重复发送。
+- **发送照片和文件**：支持文件选择和剪贴板图片粘贴，发送前显示当前聊天标题供核对，单个文件最大 95 MB。
 - **弹出窗口**：图片查看器、文章、菜单、对话框、独立聊天窗口会自动显示在手机上，可返回或关闭。
 - **防误点**：会话列表因新消息重新排序时，点击前比对行指纹，不一致就不点。
-- **画面传输**：服务器直接截取窗口画面，按 64 像素横条增量发送 JPEG，不依赖浏览器视频解码（iOS Safari 解码视频会滞后一帧）。
+- **画面传输**：默认使用 WebSocket 按横条增量推送，滚动行在手机端复用；每帧解码后确认，服务器最多保留一帧在途。连接中断自动降级为逐帧请求，并定时重试。
+- **清晰度**：首屏与会话切换保留原始分辨率；默认清晰优先，内网 IP 的静态画面使用无损 PNG。慢连接可在菜单切换为流畅优先。
+- **家里直连**：可为内网 IP 单独配置 HTTPS；设置页提供 iPhone 证书安装指引，菜单显示连接方式。
 - **全览**：需要时可按需加载原远程桌面。
 - **独立登录**：签名 Cookie 会话（30 天）、按 IP 限制登录失败次数，支持「退出所有设备」。
 - **PWA**：可添加到主屏幕，以全屏方式打开。
@@ -33,6 +38,7 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 - `mobile-services/mobile/run`：以容器用户运行 `server.py`。
 - `mobile/server.py`：读取窗口布局、截取画面、执行点击 / 滚动 / 粘贴 / 发送，全部通过标准 X11 接口完成。
 - `mobile/web/`：手机界面。
+- `scripts/setup-lan.sh` / `lan-proxy/`：可选内网 HTTPS 部署工具与代理模板。
 
 ## 环境要求
 
@@ -80,6 +86,62 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 
 6. 在手机上打开 `https://你的域名/mobile/`，用 `WEB_PASSWORD` 登录，然后在 Safari 中选择「分享 → 添加到主屏幕」。
 
+## 可选：内网 IP HTTPS
+
+在家可以直接访问 NAS 的内网 IP，无需为它注册域名。需要在 iPhone 上安装并信任本台 NAS 生成的根证书。代理只监听指定的内网 IP 和端口，允许指定网段访问；不需要修改 NAS 管理界面的端口。
+
+在 NAS 上安装好主服务后，从本仓库目录执行（把目录、IP 和网段换成自己的值）：
+
+```sh
+sudo env CHAT_ROOT=/absolute/path/chat-remote \
+  LAN_IP=192.168.1.10 LAN_CIDR=192.168.1.0/24 LAN_PORT=5843 \
+  ./scripts/setup-lan.sh
+```
+
+脚本需要 Python 3、OpenSSL 和 Docker Compose。部署目录必须在源码仓库之外。它生成独立根 CA、含 IP SAN 的 397 天服务器证书、只包含根证书的 iPhone 描述文件，以及部署时的 `lan-config.json`；私钥保存在 `chat-remote/lan-proxy/authority/` 和 `tls/`，只有服务器证书目录挂载给代理。再次运行会保留根 CA，续签服务器证书并重建独立代理；桌面客户端继续运行。
+
+1. 先通过已经受信任的 HTTPS 地址打开 `/mobile/lan-setup.html`，下载证书描述文件。
+2. 在 iPhone 设置中安装该描述文件，再到“通用 → 关于本机 → 证书信任设置”，开启对应根证书的完全信任。详见 [Apple 的说明](https://support.apple.com/zh-cn/102390)。
+3. 连接家庭 Wi-Fi，打开设置页中的家里直连地址，输入原来的网页登录密码。内外网地址各自保存登录状态。
+4. 如需主屏幕入口，在内网地址上选择“分享 → 添加到主屏幕”。根目录和 `/mobile/` 下均提供原有中性图标。
+
+固定 NAS 的内网 IP；IP 变化后需要重新运行脚本。请在服务器证书到期前重新运行同一命令续签。正常续签不更换根 CA，无需重新安装根证书。NAS 防火墙还需允许家庭网段访问所选端口；不要把这个端口映射到公网。
+
+## 升级
+
+先备份部署目录中的 `config/mobile/`、`mobile-init/`、`mobile-services/`，然后在源码仓库执行 `git pull --ff-only`。复制新版后端、网页脚本与 HTML、启动脚本到部署目录，重启主容器，使 nginx 的 WebSocket 路由生效：
+
+```sh
+cp mobile/server.py ../chat-remote/config/mobile/
+cp mobile/web/*.js mobile/web/*.html ../chat-remote/config/mobile/web/
+cp mobile-init/50-mobile ../chat-remote/mobile-init/
+cp mobile-services/mobile/run ../chat-remote/mobile-services/mobile/
+chmod +x ../chat-remote/mobile-init/50-mobile ../chat-remote/mobile-services/mobile/run
+cd ../chat-remote
+docker compose restart chat
+```
+
+已有的 `.env`、会话密钥、发送幂等记录、证书和图标不需要覆盖。自定义过 HTML 时，先合并自己的标题、图标链接与菜单入口；如启用内网代理，运行新版设置脚本生成部署配置。刷新手机页面即可加载新脚本。
+
+## 回归检查
+
+在仓库根目录运行，需要 Python 3 + Pillow 和 Node.js：
+
+```sh
+python -m py_compile mobile/server.py
+python tests/test_transport.py
+node tests/test_transport.cjs
+node tests/test_fallback.cjs
+node tests/test_send.cjs
+node tests/test_paste.cjs
+node tests/test_navigation.cjs
+bash -n scripts/setup-lan.sh
+bash -n mobile-init/50-mobile
+bash -n mobile-services/mobile/run
+```
+
+这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴与过渡生命周期，不会向真实联系人发送测试消息。
+
 ## 配置说明
 
 - `SELKIES_MANUAL_WIDTH` / `SELKIES_MANUAL_HEIGHT`：手机视图假定使用较高的竖屏桌面（默认 1800×2800）。后端会把客户端主窗口调整为 760 像素宽、几乎与桌面同高，这样手机可以在本地滚动较长的内容。
@@ -97,7 +159,9 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 ## 已知限制
 
 - 会话列表 / 聊天的识别和部分坐标依赖客户端当前的界面布局；客户端更新改版后可能需要调整。
-- Cloudflare 临时隧道会在约 128 KB 后卡住长连接 HTTP 流，因此手机端默认用逐帧请求（长轮询）获取画面。`server.py` 里的 WebSocket 推送代码是实验功能，nginx 默认没有为它开放路由。
+- 反向代理需转发 WebSocket 的 Upgrade、Host 与 Origin，示例启动脚本和内网代理已包含配置；不支持 WebSocket 的路径会使用兼容模式。
+- 界面内容仍来自桌面截图，远端响应、网络和图片解码决定切换前的等待时间；本地过渡不能消除这些时间。
+- 图片粘贴依赖 iOS / 来源 App 是否把图片提供给网页剪贴板；若来源只提供文字或链接，可以使用“＋”从照片或文件选择。
 - 画面在动的时候刷新率约为每秒 5～10 帧，适合聊天类操作，不适合看视频。
 - 按单用户设计，多台设备共用同一个桌面。
 
@@ -119,6 +183,6 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 
 ## English summary
 
-**nas-chat-mobile** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container: portrait list/chat views with local smooth scrolling, tap, long-press context menus, pinch zoom, text and file sending, pop-up windows, and a home-screen web app. A small Python service in the container captures the window over X11 and sends changed JPEG strips to the phone, and drives input with xdotool/xclip.
+**nas-chat-mobile 0.2.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. Existing neutral branding and icons are retained.
 
 This is an unofficial project. It is not affiliated with or endorsed by Tencent. "WeChat" and "Weixin" are trademarks of Tencent and are mentioned only to describe compatibility. The project does not include, modify, or reverse-engineer any Tencent software or protocol. Use it only with your own account and in compliance with the platform's terms and applicable law; do not use it for bulk messaging, marketing, bots, or monitoring others. Provided as is, without warranty, under the [MIT License](LICENSE).

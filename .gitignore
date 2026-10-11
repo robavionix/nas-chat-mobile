@@ -9,6 +9,17 @@ mobile/*.tmp
 mobile/uploads/
 mobile/debug/
 
+# Deployment-only certificates, private icons, addresses and diagnostics
+lan-proxy/authority/
+lan-proxy/tls/
+lan-proxy/nginx.conf
+lan-proxy/compose.yaml
+mobile/web/lan-icons/
+mobile/web/lan-root.cer
+mobile/web/*.mobileconfig
+diagnostics/
+*.key
+
 __pycache__/
 *.pyc
 .DS_Store
