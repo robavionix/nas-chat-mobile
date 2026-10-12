@@ -1,6 +1,6 @@
 # nas-chat-mobile
 
-当前版本：**0.5.0** · [更新记录](CHANGELOG.md)
+当前版本：**0.5.1** · [更新记录](CHANGELOG.md)
 
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
@@ -238,7 +238,7 @@ bash tests/test_lan.sh
 
 ## English summary
 
-**nas-chat-mobile 0.5.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
+**nas-chat-mobile 0.5.1** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
 
 Native Linux amd64 and arm64 deployments share one Compose configuration. The local Docker build installs isolated Python and X11 dependencies; setup, environment checks, health checks and Synology instructions are included. See [Linux deployment and validation scope](docs/linux-deployment.md).
 

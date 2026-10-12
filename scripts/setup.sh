@@ -56,7 +56,7 @@ CHAT_IMAGE=nas-chat-mobile-qq:local
 CONTAINER_NAME=qq-remote
 QQ_UI_SCALE=3
 DESKTOP_WIDTH=4200
-DESKTOP_HEIGHT=4200
+DESKTOP_HEIGHT=6000
 EOF
 fi
 # The container's abc account needs these files; do not alter any pre-existing directory.

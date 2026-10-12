@@ -6,6 +6,8 @@ const boundsCanvas=document.createElement('canvas'),boundsContext=boundsCanvas.g
 const headerCanvas=document.createElement('canvas'),headerContext=headerCanvas.getContext('2d',{willReadFrequently:true});
 const sampleCanvas=document.createElement('canvas'),sampleContext=sampleCanvas.getContext('2d',{willReadFrequently:true});
 const shiftCanvas=document.createElement('canvas'),shiftContext=shiftCanvas.getContext('2d',{alpha:false});
+const scrollBodyCanvas=document.createElement('canvas'),scrollBodyContext=scrollBodyCanvas.getContext('2d',{alpha:false});
+let scrollCache=null;
 headerCanvas.width=64;headerCanvas.height=16;
 const mirror={key:null,rect:null,layout:null,version:-1,alive:0,ready:false,changed:0,controller:null,target:null,mode:'websocket',failures:0,streamed:false,socket:null,epoch:0,retryAt:0,frames:0,bytes:0};
 let boundsVersion=-1;
@@ -22,6 +24,34 @@ function drawDesktop(context,x,y,width,height,dx,dy,dw,dh){
   context.drawImage(mirrorCanvas,left-r[0],top-r[1],right-left,bottom-top,dx+(left-x)*sx,dy+(top-y)*sy,(right-left)*sx,(bottom-top)*sy);
   return true;
 }
+// Resample the captured column once per remote frame, at the phone's actual
+// pixel density. Local scrolling then copies already-sized pixels, instead of
+// running a high-quality Retina downsample on every touch animation frame.
+function drawScrollBody(part,dpr){
+  if(box.client!=='qq'||popupActive()||!box.chatReady)return false;
+  const region=mobilePaneRegion(box,view),top=region.y+region.header,height=region.height-region.header;
+  const scale=panes.scale*dpr,width=Math.round(part.width*scale);
+  const limit=Math.min(8192,Math.floor(8*1024*1024/width));
+  const captured=Math.min(height,Math.floor(limit/scale)),pixels=Math.ceil(captured*scale);
+  if(width<1||pixels<1||captured+1e-6<part.height){if(scrollCache)releaseScrollCache();return false}
+  const key=JSON.stringify([mirror.epoch,mirror.version,mirror.key,mirror.rect,region,scale]);
+  if(scrollCache?.key!==key||part.y<scrollCache.top-1e-6||part.y+part.height>scrollCache.top+scrollCache.height+1e-6){
+    const origin=Math.max(top,Math.min(top+height-captured,part.y-(captured-part.height)/2));
+    if(scrollBodyCanvas.width!==width)scrollBodyCanvas.width=width;
+    if(scrollBodyCanvas.height!==pixels)scrollBodyCanvas.height=pixels;
+    scrollBodyContext.imageSmoothingQuality='high';
+    scrollBodyContext.fillStyle='#f4f4f4';scrollBodyContext.fillRect(0,0,width,pixels);
+    if(!drawDesktop(scrollBodyContext,region.x,origin,region.width,captured,0,0,width,captured*scale))return false;
+    scrollCache={key,top:origin,height:captured};
+  }
+  pictureContext.imageSmoothingQuality='low';
+  const dy=Math.round(part.dy*dpr),rows=Math.round((part.dy+part.height*panes.scale)*dpr)-dy;
+  const sourceY=Math.max(0,Math.min(scrollBodyCanvas.height-rows,Math.round((part.y-scrollCache.top)*scale)));
+  pictureContext.drawImage(scrollBodyCanvas,0,sourceY,width,rows,
+    part.dx||0,dy/dpr,part.dw||panes.width,rows/dpr);
+  return true;
+}
+function releaseScrollCache(){scrollCache=null;scrollBodyCanvas.width=1;scrollBodyCanvas.height=1}
 // Publish only complete frames. Decode one strip at a time so Retina frames
 // do not retain another full desktop-sized set of bitmaps on the phone.
 async function applyMessage(header,bytes,valid=()=>true){
@@ -138,9 +168,10 @@ async function socketMirror(){
     socket.onclose=()=>finish(valid()?Error('实时连接已断开'):null);
   });
 }
-function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close()}
+function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close();releaseScrollCache()}
 
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMirror()});
+window.addEventListener('pagehide',releaseScrollCache);
 function decodeImage(blob,timeout=3000){
   // WebKit can leave a bitmap decode pending under memory pressure. Bound the
   // entire decode, including its HTMLImage fallback, and dispose late results.
@@ -269,7 +300,7 @@ function followShift(moves){
   const move=moves.find(([,start,end])=>middle>=start&&middle<end)||moves.reduce((a,b)=>b[2]-b[1]>a[2]-a[1]?b:a);
   localOffset+=move[0];fitMobilePicture();
 }
-let lastPrefetch=0,lastUserScroll=0;
+let lastPrefetch=0,lastUserScroll=0,lastPrefetchFrame=null,lastPrefetchDirection=0;
 // Scroll the captured window locally first; the remainder scrolls WeChat itself.
 function scrollLocal(delta){
   if(!localScrolling())return delta;
@@ -277,13 +308,25 @@ function scrollLocal(delta){
   const before=panes.start,next=Math.max(panes.minStart,Math.min(panes.maxStart,before+delta/panes.scale));
   // Ask WeChat to scroll before the captured window runs out, so scrolling continues locally.
   const room=delta>0?panes.maxStart-next:next-panes.minStart;
-  if(delta&&room<500&&performance.now()-lastPrefetch>350){
-    lastPrefetch=performance.now();
+  const range=panes.maxStart-panes.minStart,direction=Math.sign(delta);
+  const threshold=Math.min(range*.6,180/panes.scale);
+  const frame=mirror.epoch+':'+mirror.key+':'+mirror.version;
+  const prefetch=box.client==='qq'
+    ?range>0&&room<threshold&&performance.now()-lastPrefetch>160&&(lastPrefetchFrame!==frame||lastPrefetchDirection!==direction)
+    :room<500&&performance.now()-lastPrefetch>350;
+  if(delta&&prefetch){
+    lastPrefetch=performance.now();lastPrefetchFrame=frame;lastPrefetchDirection=direction;
     const area=panes.sections.at(-1);
     remoteScroll(Math.sign(delta)*3,{x:Math.round(area.x+Math.min(298,area.width/2)),y:Math.round(panes.start+area.height/2)});
   }
   if(next===before)return delta;
-  localOffset=next-panes.base;followUntil=0;fitMobilePicture();
+  localOffset=next-panes.base;followUntil=0;
+  // Only the crop origin changes during a drag. Avoid layout/style writes and
+  // canvas sizing work in the touch hot path; hit testing shares this origin.
+  if(box.client==='qq'){
+    panes.start=next;panes.sections.at(-1).y=next;
+    stage.dataset.panes=JSON.stringify(panes);renderDirty=true;
+  }else fitMobilePicture();
   return delta-(next-before)*panes.scale;
 }
 function findContentBottom(now){
@@ -330,7 +373,12 @@ function paintMobile(now){
     pictureContext.setTransform(dpr,0,0,dpr,0,0);
     pictureContext.imageSmoothingQuality='high';
     pictureContext.fillStyle=box.client==='qq'?'#f4f4f4':'#fafafa';pictureContext.fillRect(0,0,panes.width,panes.height);
-    for(const part of panes.sections)drawDesktop(pictureContext,part.x,part.y,part.width,part.height,part.dx||0,part.dy,part.dw||panes.width,part.height*(part.scale||panes.scale));
+    if(scrollCache&&(box.client!=='qq'||popupActive()||!box.chatReady))releaseScrollCache();
+    for(const [index,part] of panes.sections.entries()){
+      if(index===panes.sections.length-1&&drawScrollBody(part,dpr))continue;
+      pictureContext.imageSmoothingQuality='high';
+      drawDesktop(pictureContext,part.x,part.y,part.width,part.height,part.dx||0,part.dy,part.dw||panes.width,part.height*(part.scale||panes.scale));
+    }
     renderDirty=false;paintedVersion=mirror.version;
     waiting.classList.add('hidden');
     if(typeof navigationPicturePainted==='function')navigationPicturePainted();

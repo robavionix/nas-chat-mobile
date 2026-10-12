@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="application-version" content="0.5.0">
+  <meta name="application-version" content="0.5.1">
   <title>内网 HTTPS 设置 · nas-chat-mobile</title>
-  <link rel="icon" type="image/png" href="./favicon.png?v=0.5.0">
-  <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png?v=0.5.0">
+  <link rel="icon" type="image/png" href="./favicon.png?v=0.5.1">
+  <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png?v=0.5.1">
   <style>
     *{box-sizing:border-box}body{margin:0;background:#f4f8fb;color:#20384a;font:16px/1.7 system-ui,-apple-system,sans-serif;padding:24px max(20px,env(safe-area-inset-right)) 40px max(20px,env(safe-area-inset-left))}main{max-width:680px;margin:auto}h1{font-size:25px}h2{font-size:19px}section{background:white;border:1px solid #dce7ef;border-radius:16px;padding:18px 22px;margin:18px 0}a{color:#147dc0;overflow-wrap:anywhere}.button{display:inline-block;padding:9px 16px;border-radius:10px;background:#147dc0;color:white;text-decoration:none}small{color:#637d90}code{overflow-wrap:anywhere}li{margin:10px 0}[hidden]{display:none!important}
   </style>
@@ -24,7 +24,7 @@
     <section><h2>2. 开启证书信任</h2><p>设置 → 通用 → 关于本机 → 证书信任设置，为上面的证书开启完全信任。</p><p><a href="https://support.apple.com/zh-cn/102390" target="_blank" rel="noopener">Apple 的证书信任说明</a></p></section>
     <section><h2>3. 打开内网手机视图</h2><p><a class="button" id="lan-open">打开家里直连</a></p><p id="lan-url"></p><p>使用原来的网页登录密码。首次使用内网地址需要单独登录，然后可以“分享 → 添加到主屏幕”。</p><p>如仍出现连接隐私提示，请核对已信任的证书、当前 NAS IP 和证书有效期。</p></section>
   </div>
-  <p><a href="./">返回手机视图</a></p><small>nas-chat-mobile v0.5.0</small>
+  <p><a href="./">返回手机视图</a></p><small>nas-chat-mobile v0.5.1</small>
 </main>
 <script>
 fetch('./lan-config.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}).then(config=>{

@@ -328,7 +328,7 @@ def qq_profile(display, box):
         result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale},
                   'chat': {'x':box['x']+split+2*scale,'y':box['y']+40*scale,'width':box['width']-split-6*scale,
                            'height':box['height']-44*scale,'header':56*scale,
-                           'headerWidth':390*scale,'headerRight':190*scale,'fillViewport':True},
+                           'headerWidth':420*scale,'headerRight':190*scale,'fillViewport':True},
                   'editorReady':False,
                   'titleRect':[box['x']+split+18*scale,box['y']+50*scale,min(300*scale,box['width']-split-250*scale),34*scale]}
         start = max(120*scale, box['height']-600*scale)
@@ -425,7 +425,10 @@ def layout():
                 # QQ's empty landing page does not reflow its column correctly
                 # until a chat is selected. Keep that first list at its saved
                 # size; fit the real chat before returning the navigation reply.
-                box['preferredWidth'] = 1120*QQ_SCALE if profile['editorReady'] else box['width']
+                # A slightly wider column reduces the phone UI scale. The tall
+                # QQ desktop leaves history outside the local viewport so a
+                # drag can use cached pixels while remote scrolling catches up.
+                box['preferredWidth'] = 1200*QQ_SCALE if profile['editorReady'] else box['width']
         elif box['compact']:
             box['compactList'], box['conversation'] = inspect_main(x, box, bool(popups))
             box['split'] = 104

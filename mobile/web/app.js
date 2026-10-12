@@ -159,6 +159,7 @@ function applyView(){
   if(box?.compact&&view!=='full')view=box.compactList?'list':'chat';
   const popup=activePopup();
   document.body.classList.toggle('list',view==='list'&&!popup);
+  document.body.classList.toggle('qq',box?.client==='qq');
   document.body.classList.toggle('popup',!!popup);
   document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
   document.querySelector('#mode-name').textContent=popup?(popup.kind==='menu'?'菜单':popup.name||'弹出窗口'):box?.setupRequired&&view!=='full'?'QQ 窗口 · 可切换全览':!box?.chatReady&&view!=='full'?clientName+'窗口':{chat:'当前聊天',list:'会话列表',full:clientName+'全览'}[view];
@@ -403,7 +404,7 @@ frame.addEventListener('load',()=>{if(view==='full')setTimeout(()=>{fit();update
 // render.js and touch.js load after this file; start once every script is in place.
 document.addEventListener('DOMContentLoaded',()=>{setInterval(()=>{if(!document.hidden)update()},8000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
-const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.5.0',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
+const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.5.1',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
 
 // Optional LAN configuration is generated on the deployment host, never baked into the bundle.
 fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{

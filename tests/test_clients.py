@@ -86,7 +86,7 @@ class ClientTests(unittest.TestCase):
         profile = scope['qq_profile'](Display(),current)
         self.assertIsNotNone(profile)
         self.assertEqual(profile['list'],{'x':60,'y':40,'width':246,'height':856,'header':52})
-        self.assertEqual(profile['chat'],{'x':308,'y':40,'width':648,'height':649,'header':56,'headerWidth':390,'headerRight':190,'fillViewport':True})
+        self.assertEqual(profile['chat'],{'x':308,'y':40,'width':648,'height':649,'header':56,'headerWidth':420,'headerRight':190,'fillViewport':True})
         current.update(panes={key:profile[key] for key in ('list','chat')},inputPoint=profile['inputPoint'],sendPoint=profile['sendPoint'])
         self.assertEqual(scope['input_point'](current),[633,769])
         self.assertEqual(scope['send_point'](current),[896,868])

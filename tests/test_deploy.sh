@@ -36,7 +36,7 @@ grep -q '^HTTP_PORT=5805$' "$qq_target/.env"
 grep -q '^CLIENT_DOCKERFILE=Dockerfile.qq$' "$qq_target/.env"
 grep -q '^QQ_UI_SCALE=3$' "$qq_target/.env"
 grep -q '^DESKTOP_WIDTH=4200$' "$qq_target/.env"
-grep -q '^DESKTOP_HEIGHT=4200$' "$qq_target/.env"
+grep -q '^DESKTOP_HEIGHT=6000$' "$qq_target/.env"
 [ -f "$qq_target/scripts/install-qq.sh" ]
 [ -f "$qq_target/mobile-services/qq/start" ]
 [ -f "$qq_target/config/mobile/client_adapter.py" ]

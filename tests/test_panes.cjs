@@ -38,3 +38,13 @@ for(const width of [320,390,430]){
   assert.ok(p.sections.every(s=>s.y+s.height<=120+3387));
 }
 console.log('PASS QQ portrait crops, readable split header, Retina touch coordinates, scrolling bounds and WeChat geometry');
+// Tall capture keeps history outside realistic iPhone portrait viewports,
+// while the desktop remains at 3x and the phone touch mapping stays exact.
+const buffered={panes:{chat:{x:1135,y:120,width:2453,height:5187,header:168,headerWidth:1260,headerRight:570,fillViewport:true}}};
+for(const [width,height] of [[320,440],[390,700],[430,780]]){
+  const p=mobilePanes(buffered,'chat',width,height);
+  assert.ok((p.maxStart-p.minStart)*p.scale>120,'remote history has at least 120 CSS pixels of local scroll buffer');
+  const before=p.sections.at(-1),q=mobilePanes(buffered,'chat',width,height,1,null,-100/p.scale);
+  assert.ok(Math.abs((p.start-q.start)*p.scale-100)<1e-6);
+  assert.equal(panePosition(q,width/2,before.dy+20).y,Math.round(q.start+20/q.scale));
+}
