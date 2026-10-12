@@ -369,7 +369,7 @@ def qq_profile(display, box):
                     content_right = divider
         # A newly logged-in QQ has a conversation column but no selected chat,
         # so there is no editor/send button yet. The list must work on its own.
-        result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale,'density':.86},
+        result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale,'density':.78},
                   'chat': {'x':box['x']+split+2*scale,'y':box['y']+40*scale,'width':content_right-split-6*scale,
                            'height':box['height']-44*scale,'header':56*scale,
                            'headerWidth':450*scale,'headerRight':190*scale if content_right==box['width'] else 0,'fillViewport':True},

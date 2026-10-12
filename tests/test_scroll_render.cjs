@@ -56,7 +56,7 @@ assert.ok(c.scrollBodyCanvas.width*c.scrollBodyCanvas.height<=8*1024*1024);
 const listDraws=nativeDraws;c.panes.sections.at(-1).y+=100/c.panes.scale;
 c.drawScrollBody(c.panes.sections.at(-1),3);assert.equal(nativeDraws,listDraws,'movement inside the band needs no new resample');
 assert.ok(c.scrollBodyCanvas.style.transform.startsWith('translate3d('));
-list.density=.86;c.box.uiScale=3;
+list.density=.78;c.box.uiScale=3;
 c.panes=mobilePanes(c.box,'list',430,800);
 const denseBefore=nativeDraws,denseBody=c.panes.sections.at(-1);
 assert.equal(c.drawScrollBody(denseBody,3),true);
