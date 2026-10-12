@@ -86,7 +86,7 @@ class ClientTests(unittest.TestCase):
         profile = scope['qq_profile'](Display(),current)
         self.assertIsNotNone(profile)
         self.assertEqual(profile['list'],{'x':60,'y':40,'width':246,'height':856,'header':52})
-        self.assertEqual(profile['chat'],{'x':308,'y':40,'width':648,'height':649,'header':56,'headerWidth':420,'headerRight':190,'fillViewport':True})
+        self.assertEqual(profile['chat'],{'x':308,'y':40,'width':648,'height':649,'header':56,'headerWidth':450,'headerRight':190,'fillViewport':True})
         current.update(panes={key:profile[key] for key in ('list','chat')},inputPoint=profile['inputPoint'],sendPoint=profile['sendPoint'])
         self.assertEqual(scope['input_point'](current),[633,769])
         self.assertEqual(scope['send_point'](current),[896,868])
@@ -117,6 +117,34 @@ class ClientTests(unittest.TestCase):
             self.assertFalse(wechat.accepts_notification('QQ'))
             self.assertTrue(wechat.accepts_notification('微信'))
             self.assertFalse(qq.accepts_notification('QQ browser'))
+
+    def test_qq_group_sidebar_is_excluded_from_capture_and_send_coordinates(self):
+        tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
+        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='qq_profile']
+        for scale in (1,2,3):
+            with self.subTest(scale=scale):
+                scope={'time':time,'qq_geometry_cache':{},'QQ_SCALE':scale,'Image':Image}
+                exec(compile(ast.Module(body=nodes,type_ignores=[]),'server.py','exec'),scope)
+                image=Image.new('RGB',(1200*scale,1980*scale),(245,245,245));draw=ImageDraw.Draw(image)
+                draw.line((376*scale,40*scale,376*scale,1976*scale),fill=(235,235,235),width=scale)
+                draw.line((1016*scale,96*scale,1016*scale,1976*scale),fill=(235,235,235),width=scale)
+                draw.line((378*scale,1769*scale,1015*scale,1769*scale),fill=(235,235,235),width=scale)
+                draw.rectangle((918*scale,1932*scale,995*scale,1964*scale),fill=(0,153,255))
+                # Names in the right column must not influence editor detection.
+                for y in range(200,1900,60):draw.rectangle((1040*scale,y*scale,1160*scale,(y+12)*scale),fill=(130,130,130))
+                class Display:
+                    def grab(self,x,y,w,h):return image.crop((x,y,x+w,y+h))
+                profile=scope['qq_profile'](Display(),{'id':'group','x':0,'y':0,'width':1200*scale,'height':1980*scale})
+                self.assertTrue(profile['editorReady'])
+                self.assertLessEqual(abs(profile['sidebarWidth']-184*scale),scale)
+                self.assertLessEqual(abs(profile['chat']['width']-634*scale),scale)
+                self.assertLessEqual(abs(profile['sendPoint'][0]-952*scale),scale)
+                self.assertLess(profile['inputPoint'][0],1016*scale)
+                self.assertLessEqual(abs(profile['chat']['height']-1729*scale),scale)
+                # A disabled group send button must still block phone sending.
+                scope['qq_geometry_cache'].clear()
+                draw.rectangle((918*scale,1932*scale,995*scale,1964*scale),fill='white')
+                self.assertFalse(scope['qq_profile'](Display(),{'id':'group','x':0,'y':0,'width':1200*scale,'height':1980*scale})['editorReady'])
 
     def test_qq_three_times_dpi_measures_native_pixels(self):
         tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
@@ -225,6 +253,26 @@ class ClientTests(unittest.TestCase):
         status,data=scope['tap'](receiver,{'target':'main','window':'QQ3','conversation':'1:list','x':550,'y':500})
         self.assertEqual(status,200);self.assertEqual(len(clicked),1)
         self.assertEqual(nav['identity'],'searched contact');self.assertFalse(nav['list']);self.assertFalse(nav['search'])
+        # Restart with a real selected row and an empty search field: reopening
+        # it changes the phone crop and must not toggle QQ's native chat closed.
+        nav.update(identity='current chat',list=True,search=None);clicked.clear()
+        scope['qq_search_active']=lambda *_:False
+        status,data=scope['tap'](receiver,{'target':'main','window':'QQ3','conversation':'1:list','x':550,'y':500})
+        self.assertEqual(status,200);self.assertEqual(clicked,[]);self.assertFalse(nav['list'])
+
+    def test_unknown_qq_search_state_recovers_from_blank_header_at_retina_dpi(self):
+        tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
+        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('qq_search_active','pane_region')]
+        scope={};exec(compile(ast.Module(body=nodes,type_ignores=[]),'server.py','exec'),scope)
+        for scale in (1,2,3):
+            image=Image.new('L',(260*scale,52*scale),232);draw=ImageDraw.Draw(image)
+            draw.rectangle((42*scale,16*scale,60*scale,30*scale),fill=117)
+            class Display:
+                def grab(self,x,y,w,h):return image.crop((x,y,x+w,y+h))
+            box={'uiScale':scale,'panes':{'list':{'x':0,'y':0,'width':260*scale}}}
+            self.assertFalse(scope['qq_search_active'](Display(),box),'grey placeholder cannot close a selected chat on restart')
+            draw.rectangle((42*scale,16*scale,44*scale,24*scale),fill=40)
+            self.assertTrue(scope['qq_search_active'](Display(),box),'an actual query keeps the search overlay guard')
 
     def test_same_host_cookies_do_not_replace_each_other(self):
         tree = ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))

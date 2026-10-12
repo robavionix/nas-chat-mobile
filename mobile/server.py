@@ -244,7 +244,7 @@ def summary(window):
 
 
 # ---- Conversation recognition from a few pixels; message text is never extracted ----
-navigation = {'identity': None, 'revision': 0, 'list': True, 'search': True}
+navigation = {'identity': None, 'revision': 0, 'list': True, 'search': None}
 known_titles = deque(maxlen=60)
 qq_geometry_cache = {}
 
@@ -323,16 +323,39 @@ def qq_profile(display, box):
             split, best = left+column, contrast
     result = None
     if split is not None:
+        # Group chats keep a member/announcement column beside both the history
+        # and editor. Find its divider in the otherwise blank editor rows. A
+        # bubble or a member name cannot form the same line in all three rows.
+        content_right = box['width']
+        sidebar_left = max(split+300*scale, box['width']-280*scale)
+        sidebar_right = box['width']-120*scale
+        if sidebar_right > sidebar_left+12*scale:
+            samples = [display.grab(box['x']+sidebar_left,box['y']+box['height']-y*scale,
+                                    sidebar_right-sidebar_left,1).convert('L').tobytes()
+                       for y in (80,130,180)]
+            divider, contrast = None, 4
+            for column in range(5,sidebar_right-sidebar_left-5):
+                score = min(min(sum(row[column-5:column-1])/4,
+                                sum(row[column+2:column+6])/4)-row[column] for row in samples)
+                if score > contrast:
+                    divider,contrast = sidebar_left+column,score
+            if divider is not None:
+                # Verify a full-height sidebar, not a coincident editor icon.
+                column = display.grab(box['x']+divider,box['y']+100*scale,1,
+                                      box['height']-110*scale).convert('L').tobytes()
+                if sum(220 <= value <= 240 for value in column) > len(column)*.95:
+                    content_right = divider
         # A newly logged-in QQ has a conversation column but no selected chat,
         # so there is no editor/send button yet. The list must work on its own.
         result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale},
-                  'chat': {'x':box['x']+split+2*scale,'y':box['y']+40*scale,'width':box['width']-split-6*scale,
+                  'chat': {'x':box['x']+split+2*scale,'y':box['y']+40*scale,'width':content_right-split-6*scale,
                            'height':box['height']-44*scale,'header':56*scale,
-                           'headerWidth':420*scale,'headerRight':190*scale,'fillViewport':True},
+                           'headerWidth':450*scale,'headerRight':190*scale if content_right==box['width'] else 0,'fillViewport':True},
+                  'sidebarWidth':box['width']-content_right,
                   'editorReady':False,
                   'titleRect':[box['x']+split+18*scale,box['y']+50*scale,min(300*scale,box['width']-split-250*scale),34*scale]}
         start = max(120*scale, box['height']-600*scale)
-        width = box['width']-split-24*scale
+        width = content_right-split-24*scale
         image = display.grab(box['x']+split+12*scale, box['y']+start, width, box['height']-80*scale-start).convert('L')
         # A divider spans the editor width; message bubbles and toolbar icons do not.
         means = image.resize((1,image.height),Image.BOX).tobytes()
@@ -345,14 +368,14 @@ def qq_profile(display, box):
                 low,high = image.crop((0,y,width,y+1)).getextrema()
                 if high-low < 10:
                     candidates.append(y)
-        button = display.grab(box['x']+box['width']-64*scale,box['y']+box['height']-32*scale,1,1).getpixel((0,0))
+        button = display.grab(box['x']+content_right-64*scale,box['y']+box['height']-32*scale,1,1).getpixel((0,0))
         if candidates and button[2] > 200 and button[1] > 100 and button[2]-button[0] > 25 and button[1]-button[0] > 15:
             editor = start+min(candidates, key=lambda y: abs(start+y-(box['height']-211*scale)))
             if editor <= box['height']-140*scale:
                 result['chat']['height'] = editor-40*scale
                 result.update(editorReady=True,
-                              inputPoint=[box['x']+split+(box['width']-split)//2, box['y']+editor+80*scale],
-                              sendPoint=[box['x']+box['width']-64*scale,box['y']+box['height']-32*scale])
+                              inputPoint=[box['x']+split+(content_right-split)//2, box['y']+editor+80*scale],
+                              sendPoint=[box['x']+content_right-64*scale,box['y']+box['height']-32*scale])
     qq_geometry_cache.clear()
     qq_geometry_cache[key] = (time.monotonic(), result)
     return result
@@ -377,6 +400,20 @@ def qq_selected_row(display, current, y):
               for x in (region['x']+4*scale,region['x']+region['width']-10*scale)]
     return (all(175 <= min(color) <= max(color) <= 225 and max(color)-min(color) < 6 for color in colors)
             and max(abs(a-b) for a,b in zip(*colors)) < 10)
+
+
+def qq_search_active(display, current):
+    """Recover unknown search state after a service restart without reading text."""
+    region = pane_region(current,'list')
+    scale = current.get('uiScale',1)
+    width = region['width']-95*scale
+    if width <= 0:
+        return True
+    # The empty search placeholder and magnifier are grey. Typed queries are
+    # dark; exclude the plus/clear controls at the right of the field.
+    pixels = display.grab(region['x']+40*scale,region['y']+12*scale,
+                          width,28*scale).convert('L').tobytes()
+    return sum(value < 100 for value in pixels) > 2*scale*scale
 
 
 def pane_region(current, view=None):
@@ -428,7 +465,7 @@ def layout():
                 # A slightly wider column reduces the phone UI scale. The tall
                 # QQ desktop leaves history outside the local viewport so a
                 # drag can use cached pixels while remote scrolling catches up.
-                box['preferredWidth'] = 1200*QQ_SCALE if profile['editorReady'] else box['width']
+                box['preferredWidth'] = 1250*QQ_SCALE+profile['sidebarWidth'] if profile['editorReady'] else box['width']
         elif box['compact']:
             box['compactList'], box['conversation'] = inspect_main(x, box, bool(popups))
             box['split'] = 104
@@ -1359,7 +1396,10 @@ class Handler(BaseHTTPRequestHandler):
                 actual = row_signature(display,current,y)
                 # Search suggestions overlay the selected row. Its outer edge
                 # pixels can still belong to a different chat underneath.
-                already_selected = not navigation.get('search',True) and bool(navigation['identity']) and qq_selected_row(display,current,y)
+                searching = navigation.get('search')
+                if searching is None:
+                    searching = qq_search_active(display,current)
+                already_selected = not searching and bool(navigation['identity']) and qq_selected_row(display,current,y)
             if max(actual)-min(actual) < 25:
                 return self.reply(409,error='这里没有可选会话，请点选联系人或群聊',layout=current)
         before_identity = navigation['identity']

@@ -76,7 +76,7 @@ async function exercise(reduced=false){
   const paint=render.slice(render.indexOf('function paintMobile(now){'),render.lastIndexOf('requestAnimationFrame(paintMobile);'));
   let clears=0,painted=0;
   Object.assign(c,{requestAnimationFrame(){},view:'chat',box:{conversation:'new',compactList:false,popups:[]},mirror:{ready:true,version:8,layout:{conversation:'old',compactList:false,popups:[]}},
-    panes:{width:390,height:600,sections:[]},scrollCache:null,renderDirty:true,visualPending:false,paintedVersion:7,
+    panes:{width:390,height:600,sections:[]},scrollCache:null,scrollClip:null,renderDirty:true,visualPending:false,paintedVersion:7,
     pictureContext:{setTransform(){},fillRect(){clears++}},findContentBottom(){},drawDesktop(){},
     navigationPicturePainted(){painted++}});
   c.document.querySelector=()=>({classList:{add(){},remove(){}}});

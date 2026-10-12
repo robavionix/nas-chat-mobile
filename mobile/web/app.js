@@ -404,7 +404,7 @@ frame.addEventListener('load',()=>{if(view==='full')setTimeout(()=>{fit();update
 // render.js and touch.js load after this file; start once every script is in place.
 document.addEventListener('DOMContentLoaded',()=>{setInterval(()=>{if(!document.hidden)update()},8000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
-const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.5.1',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
+const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.5.2',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
 
 // Optional LAN configuration is generated on the deployment host, never baked into the bundle.
 fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{

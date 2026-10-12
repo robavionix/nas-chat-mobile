@@ -102,6 +102,7 @@ function commitBackSwipe(token){
   return setView('list',token);
 }
 function captureNavigationPane(rect,height){
+  if(typeof materializeMobilePicture==='function')materializeMobilePicture();
   const pane=document.createElement('div'),snapshot=document.createElement('canvas'),picture=mobileCanvas.getBoundingClientRect();
   Object.assign(pane.style,{position:'absolute',inset:'0',background:'#fafafa',willChange:'transform'});
   const dpr=Math.min(3,devicePixelRatio||1);

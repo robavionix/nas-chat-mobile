@@ -8,6 +8,7 @@ const sampleCanvas=document.createElement('canvas'),sampleContext=sampleCanvas.g
 const shiftCanvas=document.createElement('canvas'),shiftContext=shiftCanvas.getContext('2d',{alpha:false});
 const scrollBodyCanvas=document.createElement('canvas'),scrollBodyContext=scrollBodyCanvas.getContext('2d',{alpha:false});
 let scrollCache=null;
+let scrollClip=null;
 headerCanvas.width=64;headerCanvas.height=16;
 const mirror={key:null,rect:null,layout:null,version:-1,alive:0,ready:false,changed:0,controller:null,target:null,mode:'websocket',failures:0,streamed:false,socket:null,epoch:0,retryAt:0,frames:0,bytes:0};
 let boundsVersion=-1;
@@ -25,8 +26,31 @@ function drawDesktop(context,x,y,width,height,dx,dy,dw,dh){
   return true;
 }
 // Resample the captured column once per remote frame, at the phone's actual
-// pixel density. Local scrolling then copies already-sized pixels, instead of
-// running a high-quality Retina downsample on every touch animation frame.
+// pixel density. Local scrolling moves a composited layer; it does not repaint
+// the Retina viewport, and can continue while the next strips are decoding.
+function scrollGeometry(part,dpr){
+  return JSON.stringify([box.id,box.conversation,view,mobilePaneRegion(box,view),panes.scale,dpr,
+    mobileCanvas.width,mobileCanvas.height,part.dx||0,part.dy,part.width,part.height]);
+}
+function positionScrollBody(part,dpr){
+  if(!scrollCache||scrollCache.geometry!==scrollGeometry(part,dpr)||part.y<scrollCache.top-1e-6||part.y+part.height>scrollCache.top+scrollCache.height+1e-6)return false;
+  if(!scrollClip){
+    scrollClip=document.createElement('div');scrollClip.setAttribute('aria-hidden','true');
+    Object.assign(scrollClip.style,{position:'absolute',overflow:'hidden',pointerEvents:'none',zIndex:'1',contain:'strict'});
+    Object.assign(scrollBodyCanvas.style,{display:'block',position:'absolute',left:'0',top:'0',willChange:'transform',transformOrigin:'top left'});
+    scrollClip.append(scrollBodyCanvas);stage.append(scrollClip);
+  }
+  scrollClip.hidden=false;
+  const dy=Math.round(part.dy*dpr),rows=Math.round((part.dy+part.height*panes.scale)*dpr)-dy;
+  const sourceY=Math.max(0,Math.min(scrollBodyCanvas.height-rows,Math.round((part.y-scrollCache.top)*panes.scale*dpr)));
+  const clipStyle=scrollClip.style,bodyStyle=scrollBodyCanvas.style;
+  const values={left:(part.dx||0)+'px',top:dy/dpr+'px',width:(part.dw||panes.width)+'px',height:rows/dpr+'px'};
+  for(const [key,value] of Object.entries(values))if(clipStyle[key]!==value)clipStyle[key]=value;
+  bodyStyle.width=scrollBodyCanvas.width/dpr+'px';bodyStyle.height=scrollBodyCanvas.height/dpr+'px';
+  bodyStyle.transform=`translate3d(0,${-sourceY/dpr}px,0)`;
+  scrollCache.crop={sourceY,rows,dy,dpr,dx:part.dx||0,dw:part.dw||panes.width};
+  return true;
+}
 function drawScrollBody(part,dpr){
   if(box.client!=='qq'||popupActive()||!box.chatReady)return false;
   const region=mobilePaneRegion(box,view),top=region.y+region.header,height=region.height-region.header;
@@ -34,7 +58,7 @@ function drawScrollBody(part,dpr){
   const limit=Math.min(8192,Math.floor(8*1024*1024/width));
   const captured=Math.min(height,Math.floor(limit/scale)),pixels=Math.ceil(captured*scale);
   if(width<1||pixels<1||captured+1e-6<part.height){if(scrollCache)releaseScrollCache();return false}
-  const key=JSON.stringify([mirror.epoch,mirror.version,mirror.key,mirror.rect,region,scale]);
+  const key=JSON.stringify([mirror.epoch,mirror.version,mirror.key,mirror.rect,scrollGeometry(part,dpr)]);
   if(scrollCache?.key!==key||part.y<scrollCache.top-1e-6||part.y+part.height>scrollCache.top+scrollCache.height+1e-6){
     const origin=Math.max(top,Math.min(top+height-captured,part.y-(captured-part.height)/2));
     if(scrollBodyCanvas.width!==width)scrollBodyCanvas.width=width;
@@ -42,22 +66,25 @@ function drawScrollBody(part,dpr){
     scrollBodyContext.imageSmoothingQuality='high';
     scrollBodyContext.fillStyle='#f4f4f4';scrollBodyContext.fillRect(0,0,width,pixels);
     if(!drawDesktop(scrollBodyContext,region.x,origin,region.width,captured,0,0,width,captured*scale))return false;
-    scrollCache={key,top:origin,height:captured};
+    scrollCache={key,geometry:scrollGeometry(part,dpr),top:origin,height:captured};
   }
-  pictureContext.imageSmoothingQuality='low';
-  const dy=Math.round(part.dy*dpr),rows=Math.round((part.dy+part.height*panes.scale)*dpr)-dy;
-  const sourceY=Math.max(0,Math.min(scrollBodyCanvas.height-rows,Math.round((part.y-scrollCache.top)*scale)));
-  pictureContext.drawImage(scrollBodyCanvas,0,sourceY,width,rows,
-    part.dx||0,dy/dpr,part.dw||panes.width,rows/dpr);
-  return true;
+  return positionScrollBody(part,dpr);
 }
-function releaseScrollCache(){scrollCache=null;scrollBodyCanvas.width=1;scrollBodyCanvas.height=1}
+// Navigation snapshots include the currently composited body at the same DPR.
+function materializeMobilePicture(){
+  if(!scrollCache?.crop||!scrollClip||scrollClip.hidden)return;
+  const {sourceY,rows,dy,dpr,dx,dw}=scrollCache.crop;
+  pictureContext.setTransform(dpr,0,0,dpr,0,0);pictureContext.imageSmoothingQuality='low';
+  pictureContext.drawImage(scrollBodyCanvas,0,sourceY,scrollBodyCanvas.width,rows,dx,dy/dpr,dw,rows/dpr);
+}
+function releaseScrollCache(){if(scrollClip)scrollClip.hidden=true;scrollCache=null;scrollBodyCanvas.width=1;scrollBodyCanvas.height=1}
 // Publish only complete frames. Decode one strip at a time so Retina frames
 // do not retain another full desktop-sized set of bitmaps on the phone.
 async function applyMessage(header,bytes,valid=()=>true){
   if(!valid())return;
   if(!header.key){if(header.layout)acceptLayout(header.layout);mirror.key=null;mirror.ready=false;return}
   let offset=0;const deadline=performance.now()+8000;
+  const shifted=!header.full&&header.key===mirror.key&&header.moves?.length;
   if(header.layout)acceptLayout(header.layout);
   mirror.ready=false;
   if(header.full||header.key!==mirror.key){
@@ -68,7 +95,6 @@ async function applyMessage(header,bytes,valid=()=>true){
     // Scrolled content is moved locally, every segment from the previous picture at once;
     // only newly revealed rows arrive as strips. The scrollbar column on the right is not moved.
     movePictureRows(header.moves,header.span||mirrorCanvas.width);
-    followShift(header.moves);
   }
   for(const [top,height,size,left=0,width=mirrorCanvas.width,mime='image/jpeg'] of header.strips){
     if(!valid())return;
@@ -81,6 +107,9 @@ async function applyMessage(header,bytes,valid=()=>true){
   if(header.strips.length||header.moves?.length){mirror.changed=performance.now();mirror.version++;renderDirty=true}
   mirror.key=header.key;mirror.rect=header.rect;mirror.ready=true;
   if(header.layout)mirror.layout=header.layout;
+  // Keep the complete old layer at its old origin during decode. Shift its
+  // coordinates only when the corresponding new pixels are ready to publish.
+  if(shifted)followShift(header.moves);
 }
 function movePictureRows(moves,width){
   // Same-direction scrolls can copy in place, starting at the far end. Canvas
@@ -360,9 +389,16 @@ function paintMobile(now){
   if(!box||view==='full'||document.hidden)return;
   if(typeof navigationAnimationRunning==='function'&&navigationAnimationRunning())return;
   const waiting=document.querySelector('#waiting');
-  if(!mirror.ready){if(!mirror.streamed){waiting.textContent='正在加载画面…';waiting.classList.remove('hidden')}return}
   // An HTTP layout can beat its screenshot. Never crop the old chat using the new layout.
   if(mirror.layout&&(mirror.layout.conversation!==box.conversation||mirror.layout.compactList!==box.compactList||mirror.layout.popups?.[0]?.id!==box.popups?.[0]?.id))return;
+  if(!renderDirty&&panes&&paintedVersion===mirror.version)return;
+  // Finger movement uses only a complete cached body. Never expose the native
+  // mirror while a delta is being applied, including its partially decoded rows.
+  if(panes&&box.client==='qq'&&scrollCache&&!popupActive()&&box.chatReady&&(!mirror.ready||paintedVersion===mirror.version)){
+    const dpr=mobileCanvas.width/panes.width;
+    if(positionScrollBody(panes.sections.at(-1),dpr)){renderDirty=false;return}
+  }
+  if(!mirror.ready){if(!mirror.streamed){waiting.textContent='正在加载画面…';waiting.classList.remove('hidden')}return}
   if(visualPending){
     if(waitingHeader&&headerChanged(waitingHeader)){visualPending=false;waitingHeader=null;controls()}
   }
@@ -374,6 +410,7 @@ function paintMobile(now){
     pictureContext.imageSmoothingQuality='high';
     pictureContext.fillStyle=box.client==='qq'?'#f4f4f4':'#fafafa';pictureContext.fillRect(0,0,panes.width,panes.height);
     if(scrollCache&&(box.client!=='qq'||popupActive()||!box.chatReady))releaseScrollCache();
+    if(scrollClip)scrollClip.hidden=true;
     for(const [index,part] of panes.sections.entries()){
       if(index===panes.sections.length-1&&drawScrollBody(part,dpr))continue;
       pictureContext.imageSmoothingQuality='high';

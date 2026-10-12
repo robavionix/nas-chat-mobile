@@ -30,6 +30,12 @@ function setup(){
   await c.applyMessage({key:'new',rect:[0,0,12,24],full:true,strips:[[0,8,1],[8,8,1],[16,8,1]]},new Uint8Array(3));
   assert.equal(decodes,3);assert.equal(peak,1);assert.equal(live,0);assert.equal(c.mirror.ready,true);
   assert.deepEqual(c.mirrorCanvas.rows,Array(24).fill(9));
+  let finishMove,shifts=0;
+  c.followShift=()=>{assert.equal(c.mirror.ready,true);shifts++};
+  c.decodeImage=()=>new Promise(resolve=>finishMove=resolve);
+  const moving=c.applyMessage({key:'new',rect:[0,0,12,24],moves:[[2,2,20]],strips:[[0,2,1]]},new Uint8Array(1));
+  assert.equal(shifts,0,'local coordinates must not jump while the new rows are still decoding');
+  finishMove({value:7,close(){}});await moving;assert.equal(shifts,1);
   let complete,closed=0;
   c.decodeImage=()=>new Promise(resolve=>complete=resolve);
   let valid=true;const pending=c.applyMessage({key:'later',rect:[0,0,12,24],full:true,strips:[[0,24,1]]},new Uint8Array(1),()=>valid);
