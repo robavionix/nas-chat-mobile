@@ -34,6 +34,7 @@ async function exercise(reduced=false){
     c.renderDirty=false;c.navigationPicturePainted();
   }
   assert.equal(await finished,true);assert.equal(token.cover.removed,true);assert.equal(c.navigationAnimationRunning(),false);
+  assert.equal(token.outgoing.children[0].width,1,'release retired Retina canvas backing stores');
 }
 (async()=>{
   await exercise();await exercise(true);

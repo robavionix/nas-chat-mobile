@@ -5,8 +5,8 @@ temporary=$(mktemp -d /tmp/nas-chat-deploy-test.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' EXIT
 fixture="$temporary/source"
 mkdir -p "$fixture/scripts" "$fixture/mobile/web" "$fixture/mobile/push-deps"
-cp "$repo/scripts/setup.sh" "$repo/scripts/doctor.sh" "$fixture/scripts/"
-cp "$repo/Dockerfile" "$repo/.dockerignore" "$repo/VERSION" "$repo/docker-compose.example.yml" "$fixture/"
+cp "$repo/scripts/setup.sh" "$repo/scripts/doctor.sh" "$repo/scripts/install-qq.sh" "$fixture/scripts/"
+cp "$repo/Dockerfile" "$repo/Dockerfile.qq" "$repo/.dockerignore" "$repo/VERSION" "$repo/docker-compose.example.yml" "$fixture/"
 cp -R "$repo/mobile-init" "$repo/mobile-services" "$fixture/"
 cp "$repo"/mobile/*.py "$repo"/mobile/requirements*.txt "$fixture/mobile/"
 cp "$repo"/mobile/web/*.js "$repo"/mobile/web/*.html "$repo"/mobile/web/*.png "$repo"/mobile/web/*.json "$fixture/mobile/web/"
@@ -28,6 +28,22 @@ grep -q '^PUID=1234$' "$target/.env"
 [ ! -e "$target/config/mobile/session.key" ]
 [ ! -e "$target/config/mobile/push-deps" ]
 [ ! -e "$target/config/mobile/web/lan-root.cer" ]
+qq_target="$temporary/qq deployment"
+PUID=1234 PGID=1234 bash "$fixture/scripts/setup.sh" --client qq "$qq_target"
+grep -q '^CHAT_CLIENT=qq$' "$qq_target/.env"
+grep -q '^CONTAINER_NAME=qq-remote$' "$qq_target/.env"
+grep -q '^HTTP_PORT=5805$' "$qq_target/.env"
+grep -q '^CLIENT_DOCKERFILE=Dockerfile.qq$' "$qq_target/.env"
+grep -q '^QQ_UI_SCALE=3$' "$qq_target/.env"
+grep -q '^DESKTOP_WIDTH=4200$' "$qq_target/.env"
+grep -q '^DESKTOP_HEIGHT=4200$' "$qq_target/.env"
+[ -f "$qq_target/scripts/install-qq.sh" ]
+[ -f "$qq_target/mobile-services/qq/start" ]
+[ -f "$qq_target/config/mobile/client_adapter.py" ]
+sh -n "$qq_target/mobile-services/qq/start"
+if PUID=1234 PGID=1234 bash "$fixture/scripts/setup.sh" --client invalid "$temporary/invalid-client" 2>/dev/null; then
+  echo 'Unknown chat client was accepted unexpectedly' >&2; exit 1
+fi
 before=$(sha256sum "$target/.env")
 if PUID=1234 PGID=1234 bash "$fixture/scripts/setup.sh" "$target" 2>/dev/null; then
   echo 'Existing deployment was accepted unexpectedly' >&2; exit 1

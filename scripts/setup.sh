@@ -3,7 +3,10 @@
 set -euo pipefail
 umask 077
 source_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-[ "$#" -eq 1 ] || { echo 'Usage: bash scripts/setup.sh /absolute/path/chat-remote' >&2; exit 1; }
+client=wechat
+if [ "$#" -ge 2 ] && [ "$1" = --client ]; then client=$2; shift 2; fi
+case "$client" in wechat|qq) ;; *) echo 'Client must be wechat or qq.' >&2; exit 1;; esac
+[ "$#" -eq 1 ] || { echo 'Usage: bash scripts/setup.sh [--client wechat|qq] /absolute/path/chat-remote' >&2; exit 1; }
 target=$1
 case "$target" in /*) ;; *) echo 'Use an absolute deployment path.' >&2; exit 1;; esac
 [ ! -e "$target" ] && [ ! -L "$target" ] || { echo 'Target already exists; use the upgrade instructions instead.' >&2; exit 1; }
@@ -18,7 +21,10 @@ password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 [ "${#password}" -eq 48 ] || { echo 'Could not generate a random password.' >&2; exit 1; }
 mkdir -- "$target"
 mkdir -p -- "$target/config/mobile/web" "$target/mobile"
-cp -- "$source_root/Dockerfile" "$source_root/.dockerignore" "$source_root/VERSION" "$target/"
+cp -- "$source_root/Dockerfile" "$source_root/Dockerfile.qq" "$source_root/.dockerignore" "$source_root/VERSION" "$target/"
+mkdir -p -- "$target/scripts" "$target/mobile-services/qq"
+cp -- "$source_root/scripts/install-qq.sh" "$target/scripts/"
+cp -- "$source_root/mobile-services/qq/start" "$target/mobile-services/qq/"
 cp -- "$source_root/docker-compose.example.yml" "$target/docker-compose.yml"
 cp -- "$source_root/scripts/doctor.sh" "$target/doctor.sh"
 cp -- "$source_root"/mobile/requirements*.txt "$target/mobile/"
@@ -41,6 +47,18 @@ HTTP_PORT=5804
 MEM_LIMIT=4g
 SHM_SIZE=1gb
 EOF
+if [ "$client" = qq ]; then
+  sed -i 's/^HTTP_PORT=.*/HTTP_PORT=5805/; s|^BASE_IMAGE=.*|BASE_IMAGE=ghcr.io/linuxserver/baseimage-selkies@sha256:7cab02f9222937ad1e704cd904534d69a2300b2406af466241817be0ce1d0493|' "$target/.env"
+  cat >> "$target/.env" <<EOF
+CHAT_CLIENT=qq
+CLIENT_DOCKERFILE=Dockerfile.qq
+CHAT_IMAGE=nas-chat-mobile-qq:local
+CONTAINER_NAME=qq-remote
+QQ_UI_SCALE=3
+DESKTOP_WIDTH=4200
+DESKTOP_HEIGHT=4200
+EOF
+fi
 # The container's abc account needs these files; do not alter any pre-existing directory.
 find "$target/config" -type d -exec chmod 700 {} +
 find "$target/config" -type f -exec chmod 600 {} +

@@ -1,23 +1,26 @@
 services:
   chat:
-    image: nas-chat-mobile:local
+    image: ${CHAT_IMAGE:-nas-chat-mobile:local}
     build:
       context: .
+      dockerfile: ${CLIENT_DOCKERFILE:-Dockerfile}
       args:
         BASE_IMAGE: ${BASE_IMAGE:-ghcr.io/linuxserver/weixin@sha256:ef55da929cab5fae1f45b902b94918234604fa1473a7a7322383614a51573059}
-    container_name: chat-remote
+    container_name: ${CONTAINER_NAME:-chat-remote}
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
       TZ: ${TZ:-Asia/Shanghai}
       DISPLAY: ":1"
+      CHAT_CLIENT: ${CHAT_CLIENT:-wechat}
+      QQ_UI_SCALE: ${QQ_UI_SCALE:-1}
       # Disable nested Docker from the desktop base image; it is not needed here.
       START_DOCKER: "false"
       LC_ALL: zh_CN.UTF-8
       TITLE: Remote Desktop
-      # A tall portrait desktop; the phone view resizes the client window to 760 px wide.
-      SELKIES_MANUAL_WIDTH: "1800"
-      SELKIES_MANUAL_HEIGHT: "2800"
+      # The mobile adapter fits each client's window to this tall desktop.
+      SELKIES_MANUAL_WIDTH: "${DESKTOP_WIDTH:-1800}"
+      SELKIES_MANUAL_HEIGHT: "${DESKTOP_HEIGHT:-2800}"
       SELKIES_MANUAL_RESOLUTION: "true|locked"
       SELKIES_USE_CSS_SCALING: "true|locked"
       SELKIES_UI_SHOW_SIDEBAR: "false"

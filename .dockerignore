@@ -2,6 +2,12 @@
 # Application files are installed separately; no private /config or icons enter a layer.
 **
 !Dockerfile
+!Dockerfile.qq
+!scripts/
+!scripts/install-qq.sh
+!mobile-services/
+!mobile-services/qq/
+!mobile-services/qq/start
 !mobile/
 !mobile/requirements.txt
 !mobile/requirements-push.txt

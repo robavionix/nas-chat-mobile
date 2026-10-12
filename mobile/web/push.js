@@ -20,7 +20,7 @@
     preview.textContent='通知显示内容：'+(active?.preview?'开启':'关闭');preview.setAttribute('role','switch');preview.setAttribute('aria-checked',String(!!active?.preview));
     toggle.disabled=working||!supported||!state?.available||!registration||iphone&&!installed;
     preview.disabled=test.disabled=working||!active;
-    info.textContent=notice||(!supported?'当前浏览器不支持后台推送。':iphone&&!installed?'请先通过 Safari 分享菜单添加到主屏幕，再从主屏幕打开并开启推送。':!state?'正在检查推送…':!state.available?'外网推送尚未配置。':Notification.permission==='denied'?'通知权限已关闭，请在系统设置中允许通知后再开启。':active?(state.deliveryError||(state.source==='connected'?'已开启。锁屏或关闭页面后也可接收桌面微信发出的新消息通知。':'已开启，正在等待桌面微信通知源连接。')):'关闭时不会接收通知。开启后可发送测试通知；默认隐藏消息内容。');
+    info.textContent=notice||(!supported?'当前浏览器不支持后台推送。':iphone&&!installed?'请先通过 Safari 分享菜单添加到主屏幕，再从主屏幕打开并开启推送。':!state?'正在检查推送…':!state.available?'外网推送尚未配置。':Notification.permission==='denied'?'通知权限已关闭，请在系统设置中允许通知后再开启。':active?(state.deliveryError||(state.source==='connected'?'已开启。锁屏或关闭页面后也可接收桌面聊天客户端发出的新消息通知。':'已开启，正在等待桌面聊天客户端通知源连接。')):'关闭时不会接收通知。开启后可发送测试通知；默认隐藏消息内容。');
   }
   async function refresh(){
     if(!supported){render();return}

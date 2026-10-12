@@ -7,6 +7,13 @@ from http.cookies import SimpleCookie
 from collections import deque, defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from PIL import Image
+from client_adapter import get_client
+
+client = get_client()
+QQ_SCALE = int(os.environ.get('QQ_UI_SCALE', '1'))
+if QQ_SCALE not in (1, 2, 3):
+    raise ValueError('QQ_UI_SCALE must be 1, 2 or 3')
+SESSION_COOKIE = '__Host-nas_' + client.key
 
 os.environ.setdefault('DISPLAY', ':1')
 os.environ['HOME'] = '/config'
@@ -214,6 +221,17 @@ class X:
         _x.XSendEvent(self.d, int(wid), 0, 0, ctypes.byref(event))
         _x.XFlush(self.d)
 
+    def unmaximize(self, wid):
+        # A saved maximized state makes xdotool windowsize silently ineffective.
+        event = _ClientMessage(type=33, send_event=1, display=self.d, window=int(wid),
+                               message_type=self.atom('_NET_WM_STATE'), format=32)
+        event.data[0] = 0
+        event.data[1] = self.atom('_NET_WM_STATE_MAXIMIZED_VERT')
+        event.data[2] = self.atom('_NET_WM_STATE_MAXIMIZED_HORZ')
+        event.data[3] = 1
+        _x.XSendEvent(self.d, self.root, 0, (1 << 20) | (1 << 19), ctypes.byref(event))
+        _x.XFlush(self.d)
+
 
 def popup_kind(window):
     if window['override']:
@@ -226,8 +244,9 @@ def summary(window):
 
 
 # ---- Conversation recognition from a few pixels; message text is never extracted ----
-navigation = {'identity': None, 'revision': 0, 'list': True}
+navigation = {'identity': None, 'revision': 0, 'list': True, 'search': True}
 known_titles = deque(maxlen=60)
+qq_geometry_cache = {}
 
 
 def title_identity(thumb):
@@ -281,15 +300,104 @@ def detect_split(x, box):
     return result
 
 
-MAIN_NAMES = ('WeChat', 'Weixin', '微信')
+def qq_profile(display, box):
+    """Find the QQ column/editor separators, rather than reusing WeChat points."""
+    scale = QQ_SCALE
+    if box['width'] < 820*scale or box['height'] < 580*scale:
+        return None
+    if (box['x'] < 0 or box['y'] < 0 or box['x']+box['width'] > box.get('screenWidth',float('inf'))
+            or box['y']+box['height'] > box.get('screenHeight',float('inf'))):
+        return None
+    key = (box['id'], box['x'], box['y'], box['width'], box['height'])
+    cached = qq_geometry_cache.get(key)
+    if cached and time.monotonic() - cached[0] < 2:
+        return cached[1]
+    left, right = 200*scale, min(520*scale, box['width'] - 360*scale)
+    rows = [display.grab(box['x'] + left, box['y'] + y, right-left, 1).convert('L').tobytes()
+            for y in (80*scale, box['height']-120*scale)]
+    split, best = None, 4
+    for column in range(5, right-left-5):
+        contrast = min(min(sum(row[column-5:column-1])/4,
+                           sum(row[column+2:column+6])/4)-row[column] for row in rows)
+        if contrast > best:
+            split, best = left+column, contrast
+    result = None
+    if split is not None:
+        # A newly logged-in QQ has a conversation column but no selected chat,
+        # so there is no editor/send button yet. The list must work on its own.
+        result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale},
+                  'chat': {'x':box['x']+split+2*scale,'y':box['y']+40*scale,'width':box['width']-split-6*scale,
+                           'height':box['height']-44*scale,'header':56*scale,
+                           'headerWidth':390*scale,'headerRight':190*scale,'fillViewport':True},
+                  'editorReady':False,
+                  'titleRect':[box['x']+split+18*scale,box['y']+50*scale,min(300*scale,box['width']-split-250*scale),34*scale]}
+        start = max(120*scale, box['height']-600*scale)
+        width = box['width']-split-24*scale
+        image = display.grab(box['x']+split+12*scale, box['y']+start, width, box['height']-80*scale-start).convert('L')
+        # A divider spans the editor width; message bubbles and toolbar icons do not.
+        means = image.resize((1,image.height),Image.BOX).tobytes()
+        distance = 2*scale
+        candidates = []
+        for y in range(distance,image.height-distance):
+            # Messages may touch the divider from above. Only the blank editor
+            # below it is a stable brightness reference.
+            if means[y+distance]-means[y] > 4:
+                low,high = image.crop((0,y,width,y+1)).getextrema()
+                if high-low < 10:
+                    candidates.append(y)
+        button = display.grab(box['x']+box['width']-64*scale,box['y']+box['height']-32*scale,1,1).getpixel((0,0))
+        if candidates and button[2] > 200 and button[1] > 100 and button[2]-button[0] > 25 and button[1]-button[0] > 15:
+            editor = start+min(candidates, key=lambda y: abs(start+y-(box['height']-211*scale)))
+            if editor <= box['height']-140*scale:
+                result['chat']['height'] = editor-40*scale
+                result.update(editorReady=True,
+                              inputPoint=[box['x']+split+(box['width']-split)//2, box['y']+editor+80*scale],
+                              sendPoint=[box['x']+box['width']-64*scale,box['y']+box['height']-32*scale])
+    qq_geometry_cache.clear()
+    qq_geometry_cache[key] = (time.monotonic(), result)
+    return result
+
+
+def inspect_qq(display, box, covered):
+    if not covered:
+        title = display.grab(*box['titleRect']).convert('L')
+        thumb = title.resize((max(8,title.width//6),8),Image.BOX).tobytes()
+        identity = title_identity(thumb) if max(thumb)-min(thumb) > 40 else None
+        if identity != navigation['identity']:
+            navigation.update(identity=identity,revision=navigation['revision']+1)
+    is_list = navigation['list'] or not navigation['identity']
+    return is_list, str(navigation['revision'])+':'+('list' if is_list else navigation['identity'])
+
+
+def qq_selected_row(display, current, y):
+    """Recognize QQ's selected row, excluding the lighter hover background."""
+    region = pane_region(current, 'list')
+    scale = current.get('uiScale',1)
+    colors = [display.grab(x,y-scale,2*scale,2*scale).resize((1,1),Image.BOX).getpixel((0,0))
+              for x in (region['x']+4*scale,region['x']+region['width']-10*scale)]
+    return (all(175 <= min(color) <= max(color) <= 225 and max(color)-min(color) < 6 for color in colors)
+            and max(abs(a-b) for a,b in zip(*colors)) < 10)
+
+
+def pane_region(current, view=None):
+    view = view or ('list' if current['compactList'] else 'chat')
+    if current.get('panes'):
+        return current['panes'][view]
+    split = current['split'] or 104
+    return {'x':current['x']+split+2,'y':current['y']+48,'width':current['width']-split-2,
+            'height':current['height']-48-(4 if view=='list' else 258),'header':90}
+
+
+def send_point(current):
+    return current.get('sendPoint') or [current['x']+current['width']-65,current['y']+current['height']-58]
 
 
 def layout():
     with X() as x:
         windows = [w for w in x.windows() if w['class'] != 'Selkies-desktop' and not (w['types'] & IGNORED_TYPES)]
-        main = [w for w in windows if w['class'] == 'wechat' and w['name'] in MAIN_NAMES and not w['override']]
+        main = [w for w in windows if client.matches(w)]
         if not main:
-            raise ValueError('WeChat window unavailable')
+            raise ValueError(client.label + ' window unavailable')
         selected = max(main, key=lambda w: w['width'] * w['height'])
         index = windows.index(selected)
         useful = lambda w: w['width'] >= 40 and w['height'] >= 24
@@ -300,10 +408,25 @@ def layout():
         behind = [summary(w) for w in reversed(windows[:index]) if useful(w) and not w['override']]
         box = {key: selected[key] for key in ('x', 'y', 'width', 'height', 'id')}
         box.update(mainWindow=True, screenWidth=x.width, screenHeight=x.height, popups=popups, windows=behind)
-        box['chatReady'] = box['width'] > 500 and box['height'] > 600
+        box.update(client=client.key, clientLabel=client.label)
+        box['chatReady'] = client.phone_layout and box['width'] > 500 and box['height'] > 600
+        box['setupRequired'] = not client.phone_layout and box['width'] > 600
         box['compact'] = box['chatReady'] and box['width'] < 1000
         box['compactList'], box['conversation'], box['split'] = False, None, None
-        if box['compact']:
+        if client.key == 'qq':
+            profile = qq_profile(x, box)
+            if profile:
+                box.update(panes={key:profile[key] for key in ('list','chat')},
+                           **{key:profile.get(key) for key in ('inputPoint','sendPoint','titleRect','editorReady')})
+                box.update(chatReady=True,setupRequired=False,compact=True,uiScale=QQ_SCALE,
+                           selectFromY=profile['list']['y']+profile['list']['header'],
+                           split=profile['chat']['x']-box['x']-2*QQ_SCALE)
+                box['compactList'],box['conversation'] = inspect_qq(x,box,bool(popups))
+                # QQ's empty landing page does not reflow its column correctly
+                # until a chat is selected. Keep that first list at its saved
+                # size; fit the real chat before returning the navigation reply.
+                box['preferredWidth'] = 1120*QQ_SCALE if profile['editorReady'] else box['width']
+        elif box['compact']:
             box['compactList'], box['conversation'] = inspect_main(x, box, bool(popups))
             box['split'] = 104
         elif box['chatReady'] and not popups:
@@ -314,14 +437,31 @@ def layout():
         return box
 
 
-def wait_layout(done, timeout, step=.12):
+def wait_layout(done, timeout, step=.12, fresh=False):
     """Poll until WeChat finished reacting, so replies describe the real state."""
     deadline = time.monotonic() + timeout
     while True:
+        if fresh and client.key == 'qq':
+            qq_geometry_cache.clear()
         current = layout()
         if done(current) or time.monotonic() > deadline:
             return current
         time.sleep(step)
+
+
+def fit_qq(current):
+    """Fit before replying to navigation, so the phone never sees a late reflow."""
+    width = min(current['screenWidth'], current['preferredWidth'])
+    height = max(640, current['screenHeight']-60)
+    if (current['width'],current['height'],current['x'],current['y']) != (width,height,0,0):
+        with X() as display:
+            display.unmaximize(current['id'])
+        time.sleep(.06)
+        run('xdotool','windowsize',current['id'],str(width),str(height))
+        run('xdotool','windowmove',current['id'],'0','0')
+        time.sleep(.15)
+        current = wait_layout(lambda now: now['width']==width and now['height']==height, .6, .06, fresh=True)
+    return current
 
 
 def run(*args, data=None):
@@ -346,7 +486,7 @@ def native_click(current, x, y, button=1, activate=True, guard=False):
 
 
 def input_point(current):
-    return current['x'] + current['width'] * .65, current['y'] + current['height'] - 165
+    return current.get('inputPoint') or [current['x'] + current['width'] * .65, current['y'] + current['height'] - 165]
 
 
 def set_clipboard(content, kind=None):
@@ -375,27 +515,28 @@ def input_content(current):
 
 
 def scroll_to_latest(current):
-    split = current['split'] or 104
-    x = current['x'] + split + (current['width'] - split) // 2
-    y = current['y'] + current['height'] // 2
+    region = pane_region(current, 'chat')
+    x, y = region['x']+region['width']//2, region['y']+region['header']+(region['height']-region['header'])//2
     run('xdotool', 'mousemove', str(x), str(y), 'click', '--repeat', '25', '--delay', '6', '5')
 
 
 def validated_chat(current, payload):
     return (current['mainWindow'] and current['chatReady'] and not current['compactList'] and not current['popups']
+            and current.get('editorReady',True)
             and str(payload.get('window')) == current['id'] and payload.get('conversation') == current.get('conversation'))
 
 
 def row_signature(x, current, y):
-    left = current['x'] + (current['split'] or 104) + 10
-    image = x.grab(left, y - 30, 90, 60).convert('L').resize((6, 6), Image.BOX)
+    scale = current.get('uiScale',1)
+    left = pane_region(current, 'list')['x']+8*scale
+    image = x.grab(left, y-30*scale, 90*scale, 60*scale).convert('L').resize((6, 6), Image.BOX)
     return list(image.tobytes())
 
 
 def pane_header(current):
     with X() as x:
-        split = current['split'] or 104
-        return x.grab(current['x'] + split + 2, current['y'] + 48, current['width'] - split - 2, 90).convert('L').resize((32, 4), Image.BOX).tobytes()
+        region = pane_region(current,'chat')
+        return x.grab(region['x'],region['y'],region['width'],region['header']).convert('L').resize((32,4),Image.BOX).tobytes()
 
 
 def header_changed(current, before):
@@ -408,14 +549,14 @@ def header_changed(current, before):
 def session_cookie():
     token = str(int(time.time()) + SESSION_SECONDS) + '.' + secrets.token_hex(16)
     token += '.' + hmac.new(session_key, token.encode(), hashlib.sha256).hexdigest()
-    return '__Host-nas_wechat=' + token + '; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=' + str(SESSION_SECONDS)
+    return SESSION_COOKIE + '=' + token + '; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=' + str(SESSION_SECONDS)
 
 
 def authenticated(headers):
     cookie = SimpleCookie()
     try:
         cookie.load(headers.get('Cookie', ''))
-        expiry, nonce, signature = cookie['__Host-nas_wechat'].value.split('.')
+        expiry, nonce, signature = cookie[SESSION_COOKIE].value.split('.')
         expected = hmac.new(session_key, (expiry + '.' + nonce).encode(), hashlib.sha256).hexdigest()
         return int(expiry) > time.time() and hmac.compare_digest(expected, signature)
     except (KeyError, ValueError):
@@ -425,7 +566,7 @@ def authenticated(headers):
 def push_owner(headers):
     cookie = SimpleCookie()
     cookie.load(headers.get('Cookie', ''))
-    value = cookie['__Host-nas_wechat'].value
+    value = cookie[SESSION_COOKIE].value
     return hashlib.sha256(value.encode()).hexdigest(), int(value.split('.')[0])
 
 
@@ -477,8 +618,8 @@ def brief(current):
 
 
 def probe_region(current):
-    split = current['split'] or 104
-    return [current['x'] + split + 2, current['y'] + 48, current['width'] - split - 2, min(1400, current['height'] - 306)]
+    region = pane_region(current)
+    return [region['x'],region['y'],region['width'],min(1400,region['height'])]
 
 
 # ---- Phone picture: the server sends changed strips of WeChat's window as JPEG ----
@@ -499,11 +640,13 @@ def target_rect(current, target):
     if current['popups']:
         return None
     if not current['chatReady']:
-        return [current['x'], current['y'], current['width'], current['height']], 'window:' + current['id']
-    split = current['split'] or 104
-    # The input box stays hidden in chats; lists use the full height.
-    bottom = 4 if current['compactList'] else 258
-    return [current['x'] + split + 2, current['y'] + 48, current['width'] - split - 2, current['height'] - 48 - bottom], 'main:' + current['id']
+        left,top=max(0,current['x']),max(0,current['y'])
+        right=min(current['x']+current['width'],current['screenWidth'])
+        bottom=min(current['y']+current['height'],current['screenHeight'])
+        return [left,top,max(0,right-left),max(0,bottom-top)], 'window:' + current['id']
+    region = pane_region(current)
+    suffix = (':list' if current['compactList'] else ':chat') if current.get('panes') else ''
+    return [region['x'],region['y'],region['width'],region['height']], 'main:'+current['id']+suffix
 
 
 def mirror_state(key, crcs):
@@ -633,10 +776,10 @@ def websocket_read(stream):
         return None
 
 
-def strip_runs(indexes, height):
+def strip_runs(indexes, height, max_rows=0):
     runs = []
     for i in sorted(indexes):
-        if runs and runs[-1][0] + runs[-1][1] == i * BAND:
+        if runs and runs[-1][0] + runs[-1][1] == i * BAND and (not max_rows or runs[-1][1] + BAND <= max_rows):
             runs[-1][1] = min(height, (i + 1) * BAND) - runs[-1][0]
         else:
             runs.append([i * BAND, min(height, (i + 1) * BAND) - i * BAND])
@@ -660,7 +803,7 @@ def check_request(request_id, fingerprint):
             return 409, '发送请求已变化，请重新操作'
         if state == 'done':
             return 200, None
-        return 409, '上次发送结果不确定，请先检查微信画面，避免重复发送'
+        return 409, '上次发送结果不确定，请先检查聊天客户端画面，避免重复发送'
     return None, None
 
 
@@ -722,11 +865,7 @@ class Handler(BaseHTTPRequestHandler):
             if changed or time.monotonic() > deadline:
                 image = Image.frombuffer('RGB', (width, height), data, 'raw', 'BGRX', stride, 1)
                 strips, blobs, types = [], [], []
-                for i in changed:
-                    if strips and strips[-1][0] + strips[-1][1] == i * BAND:
-                        strips[-1][1] = min(image.height, (i + 1) * BAND) - strips[-1][0]
-                    else:
-                        strips.append([i * BAND, min(image.height, (i + 1) * BAND) - i * BAND])
+                strips = strip_runs(changed,image.height,256 if current.get('client') == 'qq' and QQ_SCALE > 1 else 0)
                 for top, height in strips:
                     blob, mime = encode_strip(image.crop((0, top, image.width, top + height)), quality=quality)
                     blobs.append(blob); types.append(mime)
@@ -877,8 +1016,9 @@ class Handler(BaseHTTPRequestHandler):
                     if changed_strips or refine or moves or edge_strips or header or now - last_send > 5:
                         image = Image.frombuffer('RGB', (width, height), data, 'raw', 'BGRX', stride, 1)
                         strips, span = [], width if full else main
+                        max_rows = 256 if current.get('client') == 'qq' and QQ_SCALE > 1 else 0
                         for group, quality in ((changed_strips, motion), (refine, False)):
-                            for top, size in strip_runs(group, height):
+                            for top, size in strip_runs(group, height, max_rows):
                                 blob, mime = encode_strip(image.crop((0, top, span, top + size)), quality, latency() > .4, picture_profile)
                                 strips.append([top, size, len(blob), 0, span, mime])
                                 blobs.append(blob)
@@ -927,7 +1067,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 return self.frame(parse_qs(url.query))
             except Exception:
-                return self.reply(503, error='微信窗口尚未就绪')
+                return self.reply(503, error='聊天客户端窗口尚未就绪')
         if self.path == '/auth-check':
             valid = authenticated(self.headers)
             self.reply(200 if valid else 401, ok=valid)
@@ -935,7 +1075,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.reply(200, ok=True, layout=layout())
             except Exception:
-                self.reply(503, error='微信窗口尚未就绪')
+                self.reply(503, error='聊天客户端窗口尚未就绪')
         elif self.path == '/health':
             self.reply(200, ok=True)
         elif self.path == '/probe':
@@ -949,7 +1089,7 @@ class Handler(BaseHTTPRequestHandler):
                     image = x.grab(*region).convert('L').resize((8, 24), Image.BOX)
                 self.reply(200, ok=True, region=region, signature=list(image.tobytes()), conversation=current['conversation'])
             except Exception:
-                self.reply(503, error='微信窗口尚未就绪')
+                self.reply(503, error='聊天客户端窗口尚未就绪')
         else:
             self.reply(404, error='不存在的操作')
 
@@ -997,14 +1137,14 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/logout':
                 if authenticated(self.headers):
                     push_service.unsubscribe(push_owner(self.headers)[0])
-                return self.reply(200, cookie='__Host-nas_wechat=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
+                return self.reply(200, cookie=SESSION_COOKIE + '=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
             if self.path == '/logout-all':
                 global session_key
                 push_service.revoke_all()
                 session_key = secrets.token_bytes(32)
                 temporary = keyfile.with_suffix('.tmp'); temporary.write_bytes(session_key); temporary.chmod(0o600); temporary.replace(keyfile)
-                return self.reply(200, cookie='__Host-nas_wechat=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
-            actions = {'/send': self.send, '/tap': self.tap, '/view': self.view, '/prepare': self.prepare, '/window': self.window, '/scroll': self.scroll}
+                return self.reply(200, cookie=SESSION_COOKIE + '=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
+            actions = {'/send': self.send, '/tap': self.tap, '/view': self.view, '/prepare': self.prepare, '/window': self.window, '/scroll': self.scroll, '/search': self.search}
             if self.path not in actions:
                 return self.reply(404, error='不存在的操作')
             with lock:
@@ -1028,7 +1168,7 @@ class Handler(BaseHTTPRequestHandler):
             password = payload.get('password', '')
             if not isinstance(password, str) or not os.getenv('PASSWORD') or not hmac.compare_digest(password.encode(), os.environ['PASSWORD'].encode()):
                 failed_logins[address].append(now)
-                return self.reply(401, error='密码不正确，请使用微信网页密码')
+                return self.reply(401, error='密码不正确，请使用聊天客户端网页密码')
             return self.reply(200, cookie=session_cookie(), ok=True)
 
     def send(self, payload):
@@ -1045,22 +1185,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(status, error=error)
         current = layout()
         if current['popups']:
-            return self.reply(409, error='微信里有弹出窗口，请先处理再发送', layout=current)
+            return self.reply(409, error='聊天客户端里有弹出窗口，请先处理再发送', layout=current)
         if not validated_chat(current, payload):
             return self.reply(409, error='聊天窗口已变化，请先选择并核对聊天对象', layout=current)
         native_click(current, *input_point(current))
         if run('xdotool', 'getwindowfocus') != current['id']:
-            return self.reply(409, error='微信焦点已变化，请重试')
+            return self.reply(409, error='聊天客户端焦点已变化，请重试')
         set_clipboard(content)
         run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')
         if input_content(current) != content:
-            return self.reply(409, error='微信输入未完成，内容已保留，请再点发送')
+            return self.reply(409, error='聊天客户端输入未完成，内容已保留，请再点发送')
         if not validated_chat(layout(), payload):
             return self.reply(409, error='聊天对象已变化，未发送，请重新选择会话')
         remember(request_id, 'uncertain', fingerprint)
-        # Use WeChat's send button; its behaviour does not depend on Enter settings.
+        # Click the verified client's send button, independent of Enter settings.
         run('xdotool', 'key', '--clearmodifiers', 'Right')
-        native_click(current, current['x'] + current['width'] - 65, current['y'] + current['height'] - 58)
+        native_click(current, *send_point(current))
         if not confirm_sent(current):
             return self.reply(409, error='发送尚未确认，请检查聊天画面；输入内容已保留')
         remember(request_id, 'done', fingerprint)
@@ -1101,7 +1241,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(status, error=error)
                 current = layout()
                 if current['popups']:
-                    return self.reply(409, error='微信里有弹出窗口，请先处理再发送', layout=current)
+                    return self.reply(409, error='聊天客户端里有弹出窗口，请先处理再发送', layout=current)
                 if not validated_chat(current, payload):
                     return self.reply(409, error='聊天窗口已变化，请先选择并核对聊天对象', layout=current)
                 if input_content(current) != '':
@@ -1117,12 +1257,12 @@ class Handler(BaseHTTPRequestHandler):
                         attached = True
                         break
                 if not attached:
-                    return self.reply(409, error='微信没有接收这个文件，请重试')
+                    return self.reply(409, error='聊天客户端没有接收这个文件，请重试')
                 if not validated_chat(layout(), payload):
                     run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'BackSpace')
                     return self.reply(409, error='聊天对象已变化，未发送，请重新选择会话')
                 remember(request_id, 'uncertain', fingerprint)
-                native_click(current, current['x'] + current['width'] - 65, current['y'] + current['height'] - 58)
+                native_click(current, *send_point(current))
                 if not confirm_sent(current):
                     return self.reply(409, error='发送尚未确认，请检查聊天画面')
                 remember(request_id, 'done', fingerprint)
@@ -1130,6 +1270,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, ok=True, confirmed=True, layout=layout())
         except Exception:
             return self.reply(503, error='桌面暂时不可操作，请稍后重试')
+
+    def search(self, payload):
+        query = payload.get('query')
+        if not isinstance(query,str) or len(query)>100 or any(ord(c)<32 for c in query):
+            return self.reply(400,error='请输入最多 100 字的搜索内容')
+        current = layout()
+        if (client.key!='qq' or not current['chatReady'] or not current['compactList'] or current['popups']
+                or str(payload.get('window'))!=current['id'] or payload.get('conversation')!=current['conversation']):
+            return self.reply(409,error='请先返回 QQ 会话列表再搜索',layout=current)
+        region = pane_region(current,'list')
+        native_click(current,region['x']+90*QQ_SCALE,region['y']+26*QQ_SCALE)
+        run('xdotool','key','--clearmodifiers','ctrl+a')
+        if query:
+            set_clipboard(query)
+            run('xdotool','key','--clearmodifiers','ctrl+v')
+        else:
+            run('xdotool','key','--clearmodifiers','BackSpace','Escape')
+        time.sleep(.2)
+        navigation['search'] = bool(query)
+        qq_geometry_cache.clear()
+        return self.reply(200,ok=True,layout=layout())
 
     def tap(self, payload):
         x, y, button = payload.get('x'), payload.get('y'), payload.get('button', 1)
@@ -1161,11 +1322,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, ok=True, layout=result, copied=copied)
         if current['popups']:
             debug('tap-rejected', reason='popup open')
-            return self.reply(409, error='微信里有弹出窗口', layout=current)
+            return self.reply(409, error='聊天客户端里有弹出窗口', layout=current)
         if not current['chatReady']:
             # Login and startup screens: any point inside the window may be tapped.
             if not (current['x'] <= x < current['x'] + current['width'] and current['y'] <= y < current['y'] + current['height']):
-                return self.reply(400, error='请点选微信窗口里的内容')
+                return self.reply(400, error='请点选聊天客户端窗口里的内容')
             native_click(current, x, y, button, guard=True)
             return self.reply(200, ok=True, layout=wait_layout(lambda now: now['chatReady'] or bool(now['popups']), .8))
         if not current['mainWindow'] or str(payload.get('window')) != current['id']:
@@ -1174,10 +1335,13 @@ class Handler(BaseHTTPRequestHandler):
         if payload.get('conversation') != current['conversation'] and not (current['compactList'] and str(payload.get('conversation')).endswith(':list')):
             debug('tap-rejected', reason='conversation changed')
             return self.reply(409, error='画面已更新，请稍后重新点选', layout=current)
-        if not current['x'] + 104 < x < current['x'] + current['width'] or not current['y'] + 48 < y < current['y'] + current['height'] - 258:
+        region = pane_region(current)
+        inside = (region['x'] <= x < region['x']+region['width']
+                  and region['y'] <= y < region['y']+region['height'])
+        if not inside:
             debug('tap-rejected', reason='outside')
-            return self.reply(400, error='请点选可见的微信内容')
-        selecting = current['compactList'] and y > current['y'] + 160 and button == 1
+            return self.reply(400, error='请点选可见的聊天客户端内容')
+        selecting = current['compactList'] and y > current.get('selectFromY',current['y']+160) and button == 1
         signature = payload.get('signature')
         if selecting and isinstance(signature, list) and len(signature) == 36:
             with X() as display:
@@ -1186,12 +1350,37 @@ class Handler(BaseHTTPRequestHandler):
             debug('tap-signature', difference=round(difference, 1))
             if difference > 10:
                 return self.reply(409, error='列表刚刚更新，请看清后再点', layout=current, changed=True)
+        already_selected = False
+        if selecting and current.get('client') == 'qq':
+            with X() as display:
+                actual = row_signature(display,current,y)
+                # Search suggestions overlay the selected row. Its outer edge
+                # pixels can still belong to a different chat underneath.
+                already_selected = not navigation.get('search',True) and bool(navigation['identity']) and qq_selected_row(display,current,y)
+            if max(actual)-min(actual) < 25:
+                return self.reply(409,error='这里没有可选会话，请点选联系人或群聊',layout=current)
+        before_identity = navigation['identity']
+        if already_selected:
+            navigation.update(list=False,revision=navigation['revision']+1)
+            result = fit_qq(layout())
+            return self.reply(200,ok=True,layout=result,navigation=True)
         native_click(current, x, y, button, guard=True)
         if button == 3:
             result = wait_layout(lambda now: bool(now['popups']), 1.0)
             debug('tap-result', after=brief(result), seconds=round(time.monotonic() - started, 2))
             return self.reply(200, ok=True, layout=result)
-        if selecting:
+        if selecting and current.get('client') == 'qq':
+            # QQ keeps both desktop panes visible. Mobile back/forward changes
+            # only the crop, avoiding remote resize/reflow during the animation.
+            result = wait_layout(lambda now: bool(navigation['identity']) and navigation['identity'] != before_identity or bool(now['popups']), 2.5, .06, fresh=True)
+            selected_after = False
+            if not result['popups'] and navigation['identity'] == before_identity:
+                with X() as display:
+                    selected_after = qq_selected_row(display,result,y)
+            if not result['popups'] and navigation['identity'] and (navigation['identity'] != before_identity or selected_after):
+                navigation.update(list=False,search=False,revision=navigation['revision']+1)
+                result = fit_qq(layout())
+        elif selecting:
             # Chats turn the pane white; official accounts and similar pages only change the header.
             # A header change alone ends the wait after a pause, because chats change the header first too.
             header, deadline, header_time = pane_header(current), time.monotonic() + 2.5, None
@@ -1237,6 +1426,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def view(self, payload):
         current = layout()
+        if current.get('client') == 'qq' and current['chatReady'] and not current['popups']:
+            if payload.get('view') == 'list' and not navigation['list']:
+                navigation.update(list=True,revision=navigation['revision']+1)
+            return self.reply(200,ok=True,layout=fit_qq(layout()))
         if payload.get('view') == 'list' and current['compact'] and not current['popups']:
             if not current['compactList']:
                 native_click(current, current['x'] + 160, current['y'] + 100)
@@ -1255,15 +1448,32 @@ class Handler(BaseHTTPRequestHandler):
         # Old, disconnected pages must not keep resizing the shared desktop.
         if payload.get('stable') is not True or current['popups']:
             return self.reply(200, ok=True, layout=current)
+        if current.get('client') == 'qq' and (current['x'] < 0 or current['y'] < 0
+                or current['x']+current['width'] > current['screenWidth'] or current['y']+current['height'] > current['screenHeight']):
+            # A saved login/main window can grow off screen when its native DPI
+            # changes. Restore it before trying to inspect its separator pixels.
+            with X() as display:
+                display.unmaximize(current['id'])
+            time.sleep(.06)
+            run('xdotool','windowsize',current['id'],str(min(current['width'],current['screenWidth'])),str(min(current['height'],current['screenHeight'])))
+            run('xdotool','windowmove',current['id'],'0','0')
+            time.sleep(.15)
+            current = layout()
+        if current.get('client') == 'qq' and current['chatReady']:
+            return self.reply(200,ok=True,layout=fit_qq(current))
         if current['chatReady']:
-            width = min(current['screenWidth'], 760)
+            width = min(current['screenWidth'], current.get('preferredWidth',760))
             height = max(640, current['screenHeight'] - 60)
             if current['width'] != width or current['height'] != height or current['x'] != 0 or current['y'] != 0:
+                if current.get('client') == 'qq':
+                    with X() as display:
+                        display.unmaximize(current['id'])
+                    time.sleep(.06)
                 run('xdotool', 'windowsize', current['id'], str(width), str(height))
                 run('xdotool', 'windowmove', current['id'], '0', '0')
                 run('xdotool', 'windowactivate', '--sync', current['id'])
                 time.sleep(.15)
-            elif payload.get('reflow') is True:
+            elif payload.get('reflow') is True and current.get('client') != 'qq':
                 run('xdotool', 'windowsize', current['id'], str(width), str(height - 1))
                 time.sleep(.06)
                 run('xdotool', 'windowsize', current['id'], str(width), str(height))
@@ -1288,8 +1498,13 @@ class Handler(BaseHTTPRequestHandler):
             aspect = payload.get('aspect')
             if not isinstance(aspect, (int, float)) or not .5 <= aspect <= 3:
                 return self.reply(400, error='请求格式错误')
-            width = min(current['screenWidth'], 760)
-            height = min(current['screenHeight'] - 60, max(480, int(width * aspect)))
+            scale = QQ_SCALE if current.get('client') == 'qq' else 1
+            width = min(current['screenWidth'], 760*scale)
+            height = min(current['screenHeight'] - 60, max(480*scale, int(width * aspect)))
+            if current.get('client') == 'qq':
+                with X() as display:
+                    display.unmaximize(wid)
+                time.sleep(.06)
             run('xdotool', 'windowsize', wid, str(width), str(height))
             run('xdotool', 'windowmove', wid, '0', '0')
         ids = [w['id'] for w in current['popups']]

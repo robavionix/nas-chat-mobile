@@ -3,9 +3,9 @@ from pathlib import Path
 
 source=Path('mobile/server.py').read_text(encoding='utf-8')
 tree=ast.parse(source)
-selected=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('PhonePicture','websocket_frame','websocket_read','jpeg','encode_strip','picture_quality','confirm_sent')]
+selected=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('PhonePicture','websocket_frame','websocket_read','jpeg','encode_strip','picture_quality','confirm_sent','strip_runs')]
 from PIL import Image
-ns={'io':io,'struct':struct,'Image':Image}
+ns={'io':io,'struct':struct,'Image':Image,'BAND':64}
 exec(compile(ast.Module(body=selected,type_ignores=[]),'tested-server','exec'),ns)
 
 class ShortReader(io.BytesIO):
@@ -26,6 +26,11 @@ assert ns['websocket_read'](io.BytesIO(ns['websocket_frame'](b'ack 1',1))) is No
 assert ns['websocket_read'](io.BytesIO(masked(b'x'*4097))) is None
 assert ns['websocket_read'](io.BytesIO(masked(b'ack 1')[:-1])) is None
 assert ns['websocket_read'](io.BytesIO(masked(b'x'*126,9))) is None
+height=3387
+runs=ns['strip_runs'](range((height+63)//64),height,256)
+assert all(0<size<=256 for top,size in runs)
+assert [y for top,size in runs for y in range(top,top+size)]==list(range(height))
+assert ns['strip_runs'](range((height+63)//64),height)==[[0,height]]
 
 # Apply scroll moves and changed rows exactly as a client would, including overlapping segments.
 random.seed(7)

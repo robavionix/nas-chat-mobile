@@ -29,7 +29,7 @@ function message(text,error=false){
 }
 function popupActive(){return view!=='full'&&!!box?.popups?.length}
 function activePopup(){return popupActive()?box.popups[0]:null}
-function chatOpen(){return !!box?.chatReady&&!box.compactList&&!popupActive()}
+function chatOpen(){return !!box?.chatReady&&box.editorReady!==false&&!box.compactList&&!popupActive()}
 function controls(){
   const blocked=viewOnly||busy||navigating||visualPending||!connected()||!chatOpen()||sendRecoveries.has(sendDraftKey());
   send.disabled=blocked||composing||!draft.value.trim();send.textContent=busy?'发送中':'发送';attach.disabled=blocked;
@@ -45,6 +45,7 @@ async function call(path,data){
 }
 function sameLayout(a,b){
   return a&&b&&a.conversation===b.conversation&&a.compactList===b.compactList&&a.chatReady===b.chatReady&&a.x===b.x&&a.y===b.y&&a.width===b.width&&a.height===b.height
+    &&a.editorReady===b.editorReady&&a.preferredWidth===b.preferredWidth&&JSON.stringify(a.panes)===JSON.stringify(b.panes)
     &&JSON.stringify(a.popups)===JSON.stringify(b.popups)&&JSON.stringify(a.windows)===JSON.stringify(b.windows);
 }
 function acceptLayout(next){
@@ -66,7 +67,7 @@ function fitPopupWindow(){
   const popup=activePopup();
   if(!popup||viewOnly||popup.kind!=='window'||fittedPopups.has(popup.id))return;
   fittedPopups.add(popup.id);
-  if(popup.width<=800&&popup.height<=box.screenHeight-60&&popup.x>=0&&popup.y>=0)return;
+  if(popup.width<=800*(box.uiScale||1)&&popup.height<=box.screenHeight-60&&popup.x>=0&&popup.y>=0)return;
   call('window',{action:'fit',window:popup.id,aspect:Math.max(.5,Math.min(3,screen.clientHeight/screen.clientWidth))}).then(r=>acceptLayout(r.layout)).catch(()=>{});
 }
 function reconnect(note){
@@ -76,9 +77,10 @@ function reconnect(note){
 }
 async function tapRemote(p,button=1){
   if(viewOnly||busy||navigating||!connected()||!box){debugLog('tap-dropped',{busy,navigating,connected:connected()});return}
+  if(qqSearchTap(p,button)){openQQSearch();return}
   const popup=activePopup();
   const oldHeader=popup?null:pictureHeader(),before=box.conversation;
-  const transition=!popup&&box.compactList&&button===1&&p.y>box.y+160?beginNavigationTransition(1):null;
+  const transition=!popup&&box.compactList&&button===1&&p.y>(box.selectFromY??box.y+160)?beginNavigationTransition(1):null;
   navigating=true;controls();message(button===3?'正在打开菜单…':'正在打开…');
   try{
     const data=popup?{target:'popup',window:popup.id,x:p.x,y:p.y,button}:{target:'main',window:box.id,conversation:box.conversation,x:p.x,y:p.y,button};
@@ -98,37 +100,78 @@ async function tapRemote(p,button=1){
   }catch(e){debugLog('tap-error',{message:e.message});if(e.layout)acceptLayout(e.layout);visualPending=false;message(e.message,true)}
   finally{cancelNavigationTransition(transition);navigating=false;controls();update()}
 }
-let scrollPending=0,scrollBusy=false,scrollPoint=null;
+let qqSearchValue='';
+function qqSearchTap(p,button){
+  const region=box?.panes?.list,s=box?.uiScale||1;
+  return button===1&&box?.client==='qq'&&box.compactList&&!popupActive()&&region
+    &&p.y>=region.y&&p.y<region.y+region.header&&p.x>=region.x&&p.x<region.x+region.width-45*s;
+}
+function openQQSearch(){
+  if(document.querySelector('#qq-search'))return;
+  const overlay=document.createElement('section'),form=document.createElement('form'),label=document.createElement('label'),input=document.createElement('input'),actions=document.createElement('div');
+  overlay.id='qq-search';overlay.setAttribute('role','dialog');overlay.setAttribute('aria-modal','true');overlay.setAttribute('aria-label','搜索 QQ 联系人或群聊');
+  Object.assign(overlay.style,{position:'absolute',inset:'0',zIndex:'20',background:'#0b1b2655',padding:'max(16px, env(safe-area-inset-top)) 16px 16px'});
+  Object.assign(form.style,{background:'#fff',padding:'18px',borderRadius:'18px',marginTop:'50px'});
+  label.textContent='搜索 QQ 联系人或群聊';label.htmlFor='qq-search-input';
+  input.id='qq-search-input';input.type='search';input.value=qqSearchValue;input.maxLength=100;input.autocomplete='off';input.enterKeyHint='search';
+  Object.assign(input.style,{display:'block',width:'100%',font:'16px system-ui',padding:'12px',border:'1px solid #cdd7df',borderRadius:'12px',margin:'12px 0'});
+  const cancel=document.createElement('button'),submit=document.createElement('button');cancel.type='button';cancel.textContent='取消';submit.type='submit';submit.textContent='搜索';
+  actions.append(cancel,submit);form.append(label,input,actions);overlay.append(form);document.querySelector('#app').append(overlay);
+  const close=()=>{input.blur();overlay.remove()};cancel.onclick=close;
+  form.onsubmit=async event=>{
+    event.preventDefault();if(busy||navigating)return;
+    const query=input.value.trim(),target={query,window:box.id,conversation:box.conversation};
+    close();busy=true;controls();message('正在搜索…');
+    try{acceptLayout((await call('search',target)).layout);qqSearchValue=query;message(query?'点选搜索结果进入聊天':'已清空搜索')}
+    catch(error){if(error.layout)acceptLayout(error.layout);message(error.message,true)}
+    finally{busy=false;controls()}
+  };
+  input.focus();input.select();
+}
+let scrollPending=0,scrollBusy=false,scrollPoint=null,scrollContext=null;
 // Scrolling WeChat itself goes through the server, batched so a fling does not flood it.
 function remoteScroll(amount,point){
   if(viewOnly||!box)return;
   if(busy||navigating)return;
-  scrollPending=Math.max(-30,Math.min(30,scrollPending+amount));scrollPoint=point;
+  const context=box.conversation+'|'+(activePopup()?.id||'');
+  if(scrollContext!==context)scrollPending=0;
+  scrollContext=context;
+  // Retain recent intent, rather than several seconds of old fling events.
+  scrollPending=Math.max(-12,Math.min(12,scrollPending+amount));scrollPoint=point;
   if(!scrollBusy)flushScroll();
 }
 async function flushScroll(){
   if(!scrollPending||!scrollPoint)return;
-  const amount=Math.max(-30,Math.min(30,scrollPending));scrollPending-=amount;scrollBusy=true;
-  try{await call('scroll',{x:scrollPoint.x,y:scrollPoint.y,amount,conversation:box.conversation,popup:activePopup()?.id||null})}catch{}
+  const context=scrollContext,amount=scrollPending;scrollPending=0;scrollBusy=true;
+  try{await call('scroll',{x:scrollPoint.x,y:scrollPoint.y,amount,conversation:box.conversation,popup:activePopup()?.id||null})}
+  catch(error){
+    // A title/layout change can reject a scroll. Consume the fresh layout so
+    // every later swipe does not silently repeat the same stale request.
+    if(scrollContext===context){
+      scrollPending=0;
+      if(box?.conversation+'|'+(activePopup()?.id||'')===context){if(error.layout)acceptLayout(error.layout);else message(error.message,true)}
+    }
+  }
   scrollBusy=false;if(scrollPending)flushScroll();
 }
 function applyView(){
+  const clientName=box?.clientLabel||'聊天客户端';
   if(box?.compact&&view!=='full')view=box.compactList?'list':'chat';
   const popup=activePopup();
   document.body.classList.toggle('list',view==='list'&&!popup);
   document.body.classList.toggle('popup',!!popup);
   document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
-  document.querySelector('#mode-name').textContent=popup?(popup.kind==='menu'?'菜单':popup.name||'弹出窗口'):!box?.chatReady&&view!=='full'?'微信窗口':{chat:'当前聊天',list:'会话列表',full:'微信全览'}[view];
+  document.querySelector('#mode-name').textContent=popup?(popup.kind==='menu'?'菜单':popup.name||'弹出窗口'):box?.setupRequired&&view!=='full'?'QQ 窗口 · 可切换全览':!box?.chatReady&&view!=='full'?clientName+'窗口':{chat:'当前聊天',list:'会话列表',full:clientName+'全览'}[view];
   document.querySelector('#composer').style.display=chatOpen()&&view!=='list'?'':'none';
   if(popup){
-    document.querySelector('#popup-name').textContent=popup.kind==='menu'?'点选菜单项':(popup.name||'微信窗口');
+    document.querySelector('#popup-name').textContent=popup.kind==='menu'?'点选菜单项':(popup.name||'聊天客户端窗口');
     document.querySelector('#popup-back').hidden=popup.kind==='menu';
     document.querySelector('#popup-close').textContent=popup.kind==='menu'?'取消':'关闭';
   }
   const others=document.querySelector('#others'),key=JSON.stringify((box?.windows||[]).map(w=>[w.id,w.name]));
   if(others.dataset.key!==key){
     others.dataset.key=key;others.replaceChildren();
-    for(const w of box?.windows||[]){const b=document.createElement('button');b.textContent='显示窗口：'+(w.name||'微信窗口');b.onclick=()=>windowAction('raise',w.id);others.append(b)}
+    for(const w of box?.windows||[]){const b=document.createElement('button');b.textContent='显示窗口：'+(w.name||'聊天客户端窗口');b.onclick=()=>windowAction('raise',w.id);others.append(b)}
   }
   controls();
 }
@@ -152,7 +195,7 @@ function fit(){
   try{const doc=frame.contentDocument,v=doc.querySelector('#videoStream'),c=doc.querySelector('#videoCanvas'),r=(v?.getBoundingClientRect().width?v:c)?.getBoundingClientRect();if(r?.width>0)video=r}catch{}
   const sx=video.width/box.screenWidth,sy=video.height/box.screenHeight;
   const crop={x:video.x+box.x*sx,y:video.y+box.y*sy,w:box.width*sx,h:box.height*sy};
-  if(box.chatReady){crop.y+=48*sy;crop.h-=52*sy}
+  if(box.chatReady){const s=box.client==='qq'?(box.uiScale||1):1,top=box.client==='qq'?40*s:48;crop.y+=top*sy;crop.h-=(top+4*s)*sy}
   const scale=Math.min(screen.clientWidth/crop.w,screen.clientHeight/crop.h);
   stage.style.width=crop.w*scale+'px';stage.style.height=crop.h*scale+'px';stage.style.marginTop='';
   frame.style.left=-crop.x*scale+'px';frame.style.top=-crop.y*scale+'px';frame.style.transform='scale('+scale+')';
@@ -186,7 +229,8 @@ async function update(force=false){
     if(transientError){transientError=false;message('')}
     const height=wantedHeight();
     const reflow=!preparedWindow||previousList!==box.compactList;
-    if(!viewOnly&&box.chatReady&&!box.popups.length&&(reflow||Math.abs(box.width-Math.min(box.screenWidth,760))>20||Math.abs(box.height-height)>20||box.x>10||box.y>10)){
+    const qqOffscreen=box.client==='qq'&&(box.x<0||box.y<0||box.x+box.width>box.screenWidth||box.y+box.height>box.screenHeight);
+    if(!viewOnly&&(box.chatReady||qqOffscreen)&&!box.popups.length&&(reflow||Math.abs(box.width-Math.min(box.screenWidth,box.preferredWidth||760))>20||Math.abs(box.height-height)>20||box.x>10||box.y>10)){
       acceptLayout((await call('prepare',{height,stable:true,reflow})).layout);preparedWindow=true;
     }
   }catch(e){transientError=!!e.transient;message(e.message,true)}
@@ -292,7 +336,7 @@ function prepareAttachments(files){
   }
   // Show the chat header from the live picture so the recipient can be checked.
   const target=sheet.querySelector('canvas');
-  if(panes){const dpr=mobileCanvas.width/panes.width,h=90*panes.scale;target.width=mobileCanvas.width;target.height=Math.round(h*dpr);target.style.height=h+'px';target.getContext('2d').drawImage(mobileCanvas,0,0,mobileCanvas.width,Math.round(h*dpr),0,0,target.width,target.height)}
+  if(panes){const dpr=mobileCanvas.width/panes.width,h=panes.headerHeight||panes.sections[0].height*panes.scale;target.width=mobileCanvas.width;target.height=Math.round(h*dpr);target.style.height=h+'px';target.getContext('2d').drawImage(mobileCanvas,0,0,mobileCanvas.width,Math.round(h*dpr),0,0,target.width,target.height)}
   pendingUpload={files,window:box.id,conversation:box.conversation,ids:files.map(()=>crypto.randomUUID())};
   sheet.querySelector('#upload').textContent='发送 '+files.length+' 个';
   sheet.classList.add('open');draft.blur();
@@ -334,7 +378,7 @@ document.querySelector('#upload').onclick=async()=>{
     for(let i=0;i<job.files.length;i++){
       const prefix=job.files.length>1?`正在发送 ${i+1}/${job.files.length}`:'正在发送';
       message(prefix+'…');
-      const result=await uploadOne(job.files[i],job.ids[i],{window:job.window,conversation:job.conversation,progress:f=>message(f<1?`${prefix} · 上传 ${Math.round(f*100)}%`:prefix+' · 微信处理中…')});
+      const result=await uploadOne(job.files[i],job.ids[i],{window:job.window,conversation:job.conversation,progress:f=>message(f<1?`${prefix} · 上传 ${Math.round(f*100)}%`:prefix+' · '+(box?.clientLabel||'聊天客户端')+'处理中…')});
       if(result.layout)acceptLayout(result.layout);
     }
     pendingUpload=null;resetMessagePicture(true);message('已发送');
@@ -359,7 +403,7 @@ frame.addEventListener('load',()=>{if(view==='full')setTimeout(()=>{fit();update
 // render.js and touch.js load after this file; start once every script is in place.
 document.addEventListener('DOMContentLoaded',()=>{setInterval(()=>{if(!document.hidden)update()},8000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
-const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.4.0',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
+const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.5.0',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
 
 // Optional LAN configuration is generated on the deployment host, never baked into the bundle.
 fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{

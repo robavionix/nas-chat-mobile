@@ -22,14 +22,14 @@ function drawDesktop(context,x,y,width,height,dx,dy,dw,dh){
   context.drawImage(mirrorCanvas,left-r[0],top-r[1],right-left,bottom-top,dx+(left-x)*sx,dy+(top-y)*sy,(right-left)*sx,(bottom-top)*sy);
   return true;
 }
-// Strips are decoded first and drawn together, so a frame never shows half old and half new content.
+// Publish only complete frames. Decode one strip at a time so Retina frames
+// do not retain another full desktop-sized set of bitmaps on the phone.
 async function applyMessage(header,bytes,valid=()=>true){
   if(!valid())return;
   if(!header.key){if(header.layout)acceptLayout(header.layout);mirror.key=null;mirror.ready=false;return}
-  let offset=0;
-  const images=await Promise.all(header.strips.map(([,,size,,,mime='image/jpeg'])=>decodeImage(new Blob([bytes.subarray(offset,offset+=size)],{type:mime}))));
-  if(!valid()){images.forEach(image=>image.close?.());return}
+  let offset=0;const deadline=performance.now()+8000;
   if(header.layout)acceptLayout(header.layout);
+  mirror.ready=false;
   if(header.full||header.key!==mirror.key){
     const [,,w,h]=header.rect;
     if(mirrorCanvas.width!==w||mirrorCanvas.height!==h){mirrorCanvas.width=w;mirrorCanvas.height=h}
@@ -37,16 +37,37 @@ async function applyMessage(header,bytes,valid=()=>true){
   }else if(header.moves?.length){
     // Scrolled content is moved locally, every segment from the previous picture at once;
     // only newly revealed rows arrive as strips. The scrollbar column on the right is not moved.
-    const w=header.span||mirrorCanvas.width,h=mirrorCanvas.height;
-    if(shiftCanvas.width!==w||shiftCanvas.height!==h){shiftCanvas.width=w;shiftCanvas.height=h}
-    shiftContext.drawImage(mirrorCanvas,0,0,w,h,0,0,w,h);
-    for(const [distance,start,end] of header.moves)mirrorContext.drawImage(shiftCanvas,0,start-distance,w,end-start,0,start,w,end-start);
+    movePictureRows(header.moves,header.span||mirrorCanvas.width);
     followShift(header.moves);
   }
-  header.strips.forEach(([top,height,,left=0,width=mirrorCanvas.width],i)=>{mirrorContext.drawImage(images[i],left,top,width,height);images[i].close?.()});
+  for(const [top,height,size,left=0,width=mirrorCanvas.width,mime='image/jpeg'] of header.strips){
+    if(!valid())return;
+    const remaining=deadline-performance.now();
+    if(remaining<=0)throw Error('画面解码超时');
+    const image=await decodeImage(new Blob([bytes.subarray(offset,offset+=size)],{type:mime}),Math.min(3000,remaining));
+    try{if(!valid())return;mirrorContext.drawImage(image,left,top,width,height)}finally{image.close?.()}
+  }
+  if(!valid())return;
   if(header.strips.length||header.moves?.length){mirror.changed=performance.now();mirror.version++;renderDirty=true}
   mirror.key=header.key;mirror.rect=header.rect;mirror.ready=true;
   if(header.layout)mirror.layout=header.layout;
+}
+function movePictureRows(moves,width){
+  // Same-direction scrolls can copy in place, starting at the far end. Canvas
+  // snapshots overlapping source/destination rectangles for each drawImage.
+  const positive=moves.every(([distance])=>distance>0),negative=moves.every(([distance])=>distance<0);
+  if(positive||negative){
+    const ordered=[...moves].sort((a,b)=>positive?b[1]-a[1]:a[1]-b[1]);
+    for(const [distance,start,end] of ordered)mirrorContext.drawImage(mirrorCanvas,0,start-distance,width,end-start,0,start,width,end-start);
+    return;
+  }
+  // Unrelated animated regions can move in opposite directions. Snapshot only
+  // for that case, then explicitly release the temporary backing store.
+  shiftCanvas.width=width;shiftCanvas.height=mirrorCanvas.height;
+  try{
+    shiftContext.drawImage(mirrorCanvas,0,0,width,mirrorCanvas.height,0,0,width,mirrorCanvas.height);
+    for(const [distance,start,end] of moves)mirrorContext.drawImage(shiftCanvas,0,start-distance,width,end-start,0,start,width,end-start);
+  }finally{shiftCanvas.width=1;shiftCanvas.height=1}
 }
 async function applyFrame(buffer,valid=()=>true){
   const length=new DataView(buffer).getUint32(0),header=JSON.parse(new TextDecoder().decode(new Uint8Array(buffer,4,length)));
@@ -78,8 +99,8 @@ document.addEventListener('DOMContentLoaded',()=>{
 async function socketMirror(){
   const epoch=mirror.epoch,socket=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/mobile-api/ws?quality='+frameQuality());
   socket.binaryType='arraybuffer';mirror.socket=socket;mirror.target='websocket';
-  const valid=()=>epoch===mirror.epoch&&!document.hidden&&view!=='full';
   let received=false,last=performance.now(),busy=false,settled=false;
+  const valid=()=>!settled&&epoch===mirror.epoch&&!document.hidden&&view!=='full';
   return new Promise((resolve,reject)=>{
     function finish(error){
       if(settled)return;settled=true;clearInterval(watchdog);
@@ -120,12 +141,25 @@ async function socketMirror(){
 function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close()}
 
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMirror()});
-function decodeImage(blob){
-  if(window.createImageBitmap)return createImageBitmap(blob).catch(()=>decodeImageElement(blob));
-  return decodeImageElement(blob);
-}
-function decodeImageElement(blob){
-  return new Promise((resolve,reject)=>{const url=URL.createObjectURL(blob),img=new Image();img.onload=()=>{URL.revokeObjectURL(url);resolve(img)};img.onerror=()=>{URL.revokeObjectURL(url);reject(Error('图片解码失败'))};img.src=url});
+function decodeImage(blob,timeout=3000){
+  // WebKit can leave a bitmap decode pending under memory pressure. Bound the
+  // entire decode, including its HTMLImage fallback, and dispose late results.
+  return new Promise((resolve,reject)=>{
+    let settled=false,cancel=()=>{};
+    const finish=(error,image)=>{
+      if(settled){image?.close?.();return}
+      settled=true;clearTimeout(timer);cancel();error?reject(error):resolve(image);
+    };
+    const timer=setTimeout(()=>finish(Error('画面解码超时')),timeout);
+    const fallback=()=>{
+      if(settled)return;
+      const url=URL.createObjectURL(blob),img=new Image();
+      cancel=()=>{img.onload=img.onerror=null;URL.revokeObjectURL(url);if(!img.complete)img.src=''};
+      img.onload=()=>finish(null,img);img.onerror=()=>finish(Error('图片解码失败'));img.src=url;
+    };
+    if(window.createImageBitmap){try{createImageBitmap(blob).then(image=>finish(null,image),fallback)}catch{fallback()}}
+    else fallback();
+  });
 }
 async function mirrorLoop(){
   for(;;){
@@ -155,7 +189,7 @@ async function mirrorLoop(){
       await applyFrame(buffer,()=>!controller.signal.aborted&&epoch===mirror.epoch);
       mirror.alive=performance.now();
       if(!mirror.key)await new Promise(r=>setTimeout(r,150));
-    }catch(e){if(!controller.signal.aborted)await new Promise(r=>setTimeout(r,700))}
+    }catch(e){mirror.key=null;mirror.since=-1;if(!controller.signal.aborted)await new Promise(r=>setTimeout(r,700))}
     finally{clearTimeout(timer)}
   }
 }
@@ -166,7 +200,8 @@ function pictureHeader(){
   if(!box||!mirror.ready)return null;
   try{
     headerContext.fillStyle='#fff';headerContext.fillRect(0,0,64,16);
-    if(!drawDesktop(headerContext,box.x+106,box.y+48,box.width-106,90,0,0,64,16))return null;
+    const region=mobilePaneRegion(box,view);
+    if(!drawDesktop(headerContext,region.x,region.y,region.width,region.header,0,0,64,16))return null;
     const pixels=headerContext.getImageData(0,0,64,16).data,result=new Uint8Array(1024);
     for(let i=0;i<1024;i++)result[i]=Math.round((pixels[i*4]+pixels[i*4+1]+pixels[i*4+2])/48);
     return result;
@@ -202,7 +237,7 @@ function regionAverages(x,y,width,height,columns,rows,detail=8){
     return Array.from(sums,(s,i)=>Math.round(s/counts[i]));
   }catch{return null}
 }
-function rowSignature(y){return box?regionAverages(box.x+(box.split||104)+10,y-30,90,60,6,6):null}
+function rowSignature(y){const s=box?.uiScale||1;return box?regionAverages((box.panes?.list?.x??box.x+(box.split||104)+2)+8*s,y-30*s,90*s,60*s,6,6):null}
 function fitMobilePicture(){
   renderDirty=true;
   const popup=activePopup(),mode=popup?'popup':!box.chatReady?'window':view;
@@ -230,7 +265,7 @@ function localScrolling(){return panes&&(view==='chat'||view==='list')&&!popupAc
 function followShift(moves){
   if(!localScrolling()||!mirror.rect||Math.abs(localOffset)<1&&performance.now()-lastUserScroll>600)return;
   // Neighbouring segments differ by a pixel at most; use the one under the middle of the screen.
-  const middle=panes.start+(panes.height/panes.scale-90)/2-mirror.rect[1];
+  const middle=panes.start+panes.sections.at(-1).height/2-mirror.rect[1];
   const move=moves.find(([,start,end])=>middle>=start&&middle<end)||moves.reduce((a,b)=>b[2]-b[1]>a[2]-a[1]?b:a);
   localOffset+=move[0];fitMobilePicture();
 }
@@ -244,7 +279,8 @@ function scrollLocal(delta){
   const room=delta>0?panes.maxStart-next:next-panes.minStart;
   if(delta&&room<500&&performance.now()-lastPrefetch>350){
     lastPrefetch=performance.now();
-    remoteScroll(Math.sign(delta)*3,{x:Math.round(box.x+(box.split||104)+300),y:Math.round(panes.start+(panes.height/panes.scale)/2)});
+    const area=panes.sections.at(-1);
+    remoteScroll(Math.sign(delta)*3,{x:Math.round(area.x+Math.min(298,area.width/2)),y:Math.round(panes.start+area.height/2)});
   }
   if(next===before)return delta;
   localOffset=next-panes.base;followUntil=0;fitMobilePicture();
@@ -256,12 +292,12 @@ function findContentBottom(now){
   if(!following&&boundsVersion===mirror.version&&contentBottom!==null)return;
   if(now-boundsTime<(following?120:400))return;
   boundsTime=now;boundsVersion=mirror.version;
-  const top=box.y+138,bottom=box.y+box.height-258,height=bottom-top;
+  const region=mobilePaneRegion(box,'chat'),top=region.y+region.header,bottom=region.y+region.height,height=bottom-top,s=box.uiScale||1,step=4*s;
   if(height<=0)return;
   // Determine only the bottom of the visible message area, without OCR or storing pixels.
-  if(boundsCanvas.width!==64)boundsCanvas.width=64;if(boundsCanvas.height!==Math.ceil(height/4))boundsCanvas.height=Math.ceil(height/4);
+  if(boundsCanvas.width!==64)boundsCanvas.width=64;if(boundsCanvas.height!==Math.ceil(height/step))boundsCanvas.height=Math.ceil(height/step);
   boundsContext.fillStyle='#fff';boundsContext.fillRect(0,0,64,boundsCanvas.height);
-  if(!drawDesktop(boundsContext,box.x+(box.split||104)+8,top,box.width-(box.split||104)-28,height,0,0,64,boundsCanvas.height))return;
+  if(!drawDesktop(boundsContext,region.x+6*s,top,region.width-26*s,height,0,0,64,boundsCanvas.height))return;
   const pixels=boundsContext.getImageData(0,0,64,boundsCanvas.height).data;
   let last=-1;
   for(let y=0;y<boundsCanvas.height;y++){
@@ -272,16 +308,16 @@ function findContentBottom(now){
     }
     if(count>=2)last=y;
   }
-  const next=last<0?top:Math.min(bottom,top+(last+1)*4+32);
+  const next=last<0?top:Math.min(bottom,top+(last+1)*step+32*s);
   if(following)localOffset=0;
-  if(contentBottom===null||Math.abs(next-contentBottom)>8||(following&&panes&&panes.start!==panes.base)){contentBottom=next;fitMobilePicture()}
+  if(contentBottom===null||Math.abs(next-contentBottom)>8*s||(following&&panes&&panes.start!==panes.base)){contentBottom=next;fitMobilePicture()}
 }
 function paintMobile(now){
   requestAnimationFrame(paintMobile);
   if(!box||view==='full'||document.hidden)return;
   if(typeof navigationAnimationRunning==='function'&&navigationAnimationRunning())return;
   const waiting=document.querySelector('#waiting');
-  if(!mirror.ready){waiting.textContent='正在加载画面…';waiting.classList.remove('hidden');return}
+  if(!mirror.ready){if(!mirror.streamed){waiting.textContent='正在加载画面…';waiting.classList.remove('hidden')}return}
   // An HTTP layout can beat its screenshot. Never crop the old chat using the new layout.
   if(mirror.layout&&(mirror.layout.conversation!==box.conversation||mirror.layout.compactList!==box.compactList||mirror.layout.popups?.[0]?.id!==box.popups?.[0]?.id))return;
   if(visualPending){
@@ -293,8 +329,8 @@ function paintMobile(now){
     const dpr=mobileCanvas.width/panes.width;
     pictureContext.setTransform(dpr,0,0,dpr,0,0);
     pictureContext.imageSmoothingQuality='high';
-    pictureContext.fillStyle='#fafafa';pictureContext.fillRect(0,0,panes.width,panes.height);
-    for(const part of panes.sections)drawDesktop(pictureContext,part.x,part.y,part.width,part.height,0,part.dy,panes.width,part.height*panes.scale);
+    pictureContext.fillStyle=box.client==='qq'?'#f4f4f4':'#fafafa';pictureContext.fillRect(0,0,panes.width,panes.height);
+    for(const part of panes.sections)drawDesktop(pictureContext,part.x,part.y,part.width,part.height,part.dx||0,part.dy,part.dw||panes.width,part.height*(part.scale||panes.scale));
     renderDirty=false;paintedVersion=mirror.version;
     waiting.classList.add('hidden');
     if(typeof navigationPicturePainted==='function')navigationPicturePainted();

@@ -2,7 +2,7 @@
 
 本项目使用同一套源码和 Compose 配置，支持 `linux/amd64`（Intel / AMD 64 位）与 `linux/arm64`。宿主机可以是普通 Linux、虚拟机或提供 Docker 的 NAS，无需桌面环境、显示器或 GPU。上游 [LinuxServer 镜像](https://docs.linuxserver.io/images/docker-weixin/) 提供这两种架构；32 位 i386 / i686 和 ARMv7 不支持。
 
-容器内统一使用 Debian 用户空间；宿主机发行版不需要安装 Python、X11 或聊天客户端。宿主机仍需满足 Docker 和上游客户端的 CPU / 内核要求，不能保证所有旧型号 CPU 或旧 NAS 内核都可运行。
+微信容器使用 Debian 用户空间，QQ 独立镜像使用 Ubuntu 用户空间；宿主机发行版不需要安装 Python、X11 或聊天客户端。QQ 部署见 [独立部署说明](qq-deployment.md)。宿主机仍需满足 Docker 和上游客户端的 CPU / 内核要求，不能保证所有旧型号 CPU 或旧 NAS 内核都可运行。
 
 ## 通用 Linux 安装
 

@@ -4,18 +4,20 @@
   let gesture = null, pinch = null, carry = 0, inertia = 0, pressTimer = 0;
   const fingers = new Map();
   let pendingDelta=0,scrollFrame=0;
-  function flushLocal(){cancelAnimationFrame(scrollFrame);scrollFrame=0;const delta=pendingDelta;pendingDelta=0;if(delta)wheel(delta)}
+  function flushLocal(){cancelAnimationFrame(scrollFrame);scrollFrame=0;const delta=pendingDelta;pendingDelta=0;if(delta&&!busy&&!navigating){try{wheel(delta)}catch(err){stop();message(err.message,true)}}}
   function queueLocal(delta){pendingDelta+=delta;if(!scrollFrame)scrollFrame=requestAnimationFrame(flushLocal)}
   function stop(reset=true) { cancelAnimationFrame(inertia); inertia = 0; if(reset) carry = 0; }
   // The touch layer only exists over the phone picture, whose crop is described by its panes.
   function position(x, y) {
     if (!box || !stage.dataset.panes) throw Error('画面尚未加载，请稍后重试');
     const r=stage.getBoundingClientRect(),p=panePosition(JSON.parse(stage.dataset.panes),x-r.left,y-r.top);
+    if(!p)throw Error('请点选聊天客户端内容');
     return {x:Math.max(0,Math.min(box.screenWidth-1,p.x)),y:Math.max(0,Math.min(box.screenHeight-1,p.y))};
   }
   function visibleCenter() {
     const r=stage.getBoundingClientRect(),s=screen.getBoundingClientRect();
-    const top=Math.max(r.top,s.top),bottom=Math.min(r.bottom,s.bottom);
+    const body=panes?.sections.at(-1),bodyTop=body?r.top+body.dy:r.top;
+    const top=Math.max(bodyTop,s.top),bottom=Math.min(r.bottom,s.bottom);
     return position((Math.max(r.left,s.left)+Math.min(r.right,s.right))/2,top+(bottom-top)*.55);
   }
   function wheel(delta) {
@@ -56,10 +58,18 @@
     return {d:Math.hypot(a.x-b.x,a.y-b.y),x:(a.x+b.x)/2,y:(a.y+b.y)/2};
   }
   function cancelPress() { clearTimeout(pressTimer); pressTimer=0; }
+  function interrupt(){
+    stop();cancelPress();cancelAnimationFrame(scrollFrame);cancelAnimationFrame(gesture?.backFrame);
+    if(gesture?.back)cancelNavigationTransition(gesture.back);
+    scrollFrame=0;pendingDelta=0;gesture=null;pinch=null;fingers.clear();
+  }
   layer.addEventListener('pointerdown', e => {
     if (e.pointerType==='mouse' && e.button!==0) return;
     e.preventDefault(); stop();
     if(busy||navigating)return;
+    // iOS can lose capture during a keyboard/viewport change without delivering
+    // pointerup. A fresh primary touch must not become a permanent fake pinch.
+    if(e.isPrimary&&fingers.size)interrupt();
     fingers.set(e.pointerId,{x:e.clientX,y:e.clientY});
     layer.setPointerCapture(e.pointerId);
     if (fingers.size===2) {
@@ -131,6 +141,7 @@
   }
   layer.addEventListener('pointerup', e=>finish(e));
   layer.addEventListener('pointercancel', e=>finish(e,true));
+  layer.addEventListener('lostpointercapture',e=>finish(e,true));
   layer.addEventListener('wheel',e=>{
     e.preventDefault();
     if(busy||navigating)return;
@@ -139,7 +150,8 @@
     try { wheel(e.deltaY*(e.deltaMode===1?20:e.deltaMode===2?screen.clientHeight:1)); } catch(err) { message(err.message,true); }
   },{passive:false});
   layer.addEventListener('contextmenu',e=>e.preventDefault());
-  window.addEventListener('resize',()=>stop());
+  window.addEventListener('resize',interrupt);
   window.addEventListener('nas-navigation-start',()=>{stop();cancelAnimationFrame(scrollFrame);cancelAnimationFrame(gesture?.backFrame);scrollFrame=0;pendingDelta=0;cancelPress();gesture=null;pinch=null;fingers.clear()});
-  window.addEventListener('pagehide',()=>{stop();cancelAnimationFrame(scrollFrame);scrollFrame=0;pendingDelta=0});
+  window.addEventListener('pagehide',interrupt);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)interrupt()});
 })();

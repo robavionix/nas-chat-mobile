@@ -1,6 +1,7 @@
 // Keep the old viewport until the target screenshot has been painted. Only transforms
 // move during the transition; the resting canvas stays at its native pixel density.
 let navigationTransition=null,listNavigationSnapshot=null;
+function releaseNavigationPane(pane){const canvas=pane?.children[0];if(canvas&&typeof canvas.width==='number'){canvas.width=1;canvas.height=1}}
 function navigationAnimationRunning(){return ['animating','dragging','cancelling'].includes(navigationTransition?.phase)}
 function cancelNavigationTransition(token=navigationTransition,completed=false){
   if(!token||navigationTransition!==token)return;
@@ -9,6 +10,8 @@ function cancelNavigationTransition(token=navigationTransition,completed=false){
   for(const animation of token.animations||[])animation.cancel();
   token.preview?.remove();
   token.cover.remove();
+  releaseNavigationPane(token.outgoing);releaseNavigationPane(token.incoming);
+  if(token.preview!==listNavigationSnapshot)releaseNavigationPane(token.preview);
   if(token.optimistic){document.body.classList.remove('swipe-return-pending');if(typeof fit==='function')fit()}
   token.resolve?.(completed);
   renderDirty=true;
@@ -25,7 +28,7 @@ function beginNavigationTransition(direction,interactive=false){
   cover.append(outgoing);document.body.append(cover);
   const token={cover,outgoing,direction,width:rect.width,height:rect.height,before:box.conversation,list:box.compactList,phase:'waiting',animations:[]};
   navigationTransition=token;
-  if(direction===1&&box.compactList){try{listNavigationSnapshot=copyNavigationPane(outgoing,rect.width,rect.height)}catch{listNavigationSnapshot=null}}
+  if(direction===1&&box.compactList){releaseNavigationPane(listNavigationSnapshot);try{listNavigationSnapshot=copyNavigationPane(outgoing,rect.width,rect.height)}catch{listNavigationSnapshot=null}}
   if(interactive){
     token.phase='dragging';token.progress=0;
     // Reuse the cached list at its original size; copying or scaling here can hitch
@@ -158,10 +161,11 @@ function navigationPicturePainted(){
   }catch{cancelNavigationTransition(token)}
 }
 window.addEventListener('resize',()=>{
-  listNavigationSnapshot=null;
+  const old=listNavigationSnapshot;listNavigationSnapshot=null;
   const token=navigationTransition,rect=screen.getBoundingClientRect();
   if(token?.optimistic&&Math.abs(rect.width-token.width)<1){token.cover.style.top=rect.top+'px';navigationLayoutChanged();return}
   if(token?.target)settleNavigationTransition(token,false);else cancelNavigationTransition();
+  if(old!==token?.preview)releaseNavigationPane(old);
 });
-window.addEventListener('pagehide',()=>{listNavigationSnapshot=null;cancelNavigationTransition()});
+window.addEventListener('pagehide',()=>{const old=listNavigationSnapshot;listNavigationSnapshot=null;cancelNavigationTransition();releaseNavigationPane(old)});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelNavigationTransition()});

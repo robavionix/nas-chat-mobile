@@ -17,6 +17,8 @@ lan-proxy/tls/
 lan-proxy/nginx.conf
 lan-proxy/compose.yaml
 mobile/web/lan-icons/
+mobile/web/icons/private-*/
+private-branding/
 mobile/web/lan-root.cer
 mobile/web/*.mobileconfig
 diagnostics/

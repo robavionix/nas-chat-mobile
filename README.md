@@ -1,10 +1,10 @@
 # nas-chat-mobile
 
-当前版本：**0.4.0** · [更新记录](CHANGELOG.md)
+当前版本：**0.5.0** · [更新记录](CHANGELOG.md)
 
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
-它配合 [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) 镜像工作：该镜像在容器里通过网页远程桌面运行 Linux 版客户端。本项目在同一个容器里加一层手机视图：竖屏布局、会话列表与聊天切换、触控点击 / 长按 / 滑动 / 双指缩放、文字与文件发送，并可添加到 iPhone 主屏幕。
+微信部署配合 [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) 镜像工作，QQ 部署使用独立 Selkies 桌面镜像和腾讯官方 Linux 安装包。本项目在同一个容器里加一层手机视图：竖屏布局、会话列表与聊天切换、触控点击 / 长按 / 滑动 / 双指缩放、文字与文件发送，并可添加到 iPhone 主屏幕。
 
 > **非官方项目。** 与腾讯公司及其关联公司无任何关联，未获其授权或认可。使用前请阅读文末的 [免责声明](#免责声明)。
 
@@ -54,6 +54,8 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 0.4.0 已完成原生 x86_64 Linux 容器构建与截图、输入、登录、WebSocket 冒烟验证；群晖真机与真实账号操作尚待部署验证，详见 [验证范围](docs/linux-deployment.md#验证与故障定位)。
 
 ## 安装
+
+默认部署微信。QQ 请使用 `bash scripts/setup.sh --client qq /absolute/path/qq-remote` 创建独立部署，详见 [QQ 部署与验证](docs/qq-deployment.md)。两者共用手机前端，账号、网页登录和推送订阅分别保存。
 
 1. 在源码目录运行安装脚本，准备一个新的独立部署目录（将绝对路径换成自己的路径）：
 
@@ -168,7 +170,8 @@ docker compose restart chat
 在仓库根目录运行，需要 Python 3 + Pillow + cryptography 和 Node.js：
 
 ```sh
-python -m py_compile mobile/server.py mobile/push_service.py
+python -m py_compile mobile/server.py mobile/push_service.py mobile/client_adapter.py
+python -m unittest discover -s tests -p 'test_*.py'
 python tests/test_transport.py
 python tests/test_push.py
 node tests/test_transport.cjs
@@ -178,6 +181,10 @@ node tests/test_paste.cjs
 node tests/test_navigation.cjs
 node tests/test_swipe.cjs
 node tests/test_push.cjs
+node tests/test_panes.cjs
+node tests/test_search.cjs
+node tests/test_render.cjs
+node tests/test_scroll.cjs
 bash -n scripts/setup-lan.sh
 bash -n mobile-init/50-mobile
 bash -n mobile-services/mobile/run
@@ -185,9 +192,10 @@ bash -n mobile-services/mobile/python
 bash -n scripts/setup.sh
 bash -n scripts/doctor.sh
 bash tests/test_deploy.sh
+bash tests/test_lan.sh
 ```
 
-这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴、过渡与侧滑生命周期，以及通知权限、订阅撤销、过期处理和消息预览。不会向真实联系人或真实推送端点发送测试消息。
+这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴、过渡与侧滑生命周期、Retina 解码超时与内存释放、QQ 搜索及滚动布局恢复，以及通知权限、订阅撤销、过期处理和消息预览。不会向真实联系人或真实推送端点发送测试消息。
 
 ## 配置说明
 
@@ -230,7 +238,7 @@ bash tests/test_deploy.sh
 
 ## English summary
 
-**nas-chat-mobile 0.4.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. Existing neutral branding and icons are retained.
+**nas-chat-mobile 0.5.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP static frames use lossless PNG. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
 
 Native Linux amd64 and arm64 deployments share one Compose configuration. The local Docker build installs isolated Python and X11 dependencies; setup, environment checks, health checks and Synology instructions are included. See [Linux deployment and validation scope](docs/linux-deployment.md).
 

@@ -1,0 +1,11 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync('mobile/web/app.js','utf8');
+const code=source.slice(source.indexOf('function qqSearchTap('),source.indexOf('function openQQSearch('));
+const c={box:{client:'qq',compactList:true,uiScale:3,panes:{list:{x:180,y:120,width:949,header:156}}},popupActive:()=>false};
+vm.runInNewContext(code,c);
+assert.ok(c.qqSearchTap({x:450,y:195},1));
+for(const [p,b] of [[{x:1053,y:195},1],[{x:450,y:390},1],[{x:450,y:195},3]])assert.ok(!c.qqSearchTap(p,b));
+c.box.compactList=false;assert.ok(!c.qqSearchTap({x:450,y:195},1));
+c.box.compactList=true;c.box.client='wechat';assert.ok(!c.qqSearchTap({x:450,y:195},1));
+c.box.client='qq';c.popupActive=()=>true;assert.ok(!c.qqSearchTap({x:450,y:195},1));
+console.log('PASS native QQ search input uses a local mobile keyboard; chat, menu, plus button and WeChat are excluded');

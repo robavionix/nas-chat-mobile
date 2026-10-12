@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
+from client_adapter import get_client
 
 
 def public_origin(value):
@@ -61,7 +62,8 @@ def plain_text(value, limit):
 
 
 class PushService:
-    def __init__(self, root, origin=None, sender=None, clock=time.time):
+    def __init__(self, root, origin=None, sender=None, clock=time.time, client=None):
+        self.client = client or get_client()
         self.root, self.clock = Path(root) / 'push', clock
         self.lock = threading.RLock()
         self.queue = queue.Queue(maxsize=64)
@@ -254,14 +256,16 @@ class PushService:
             threading.Thread(target=self.worker, daemon=True).start()
         threading.Thread(target=self.watch, daemon=True).start()
 
-    @staticmethod
-    def session_bus():
+    def accepts_notification(self, app):
+        return str(app).casefold() in self.client.notification_apps
+
+    def session_bus(self):
         for process in Path('/proc').iterdir():
             if not process.name.isdigit():
                 continue
             try:
                 name = (process / 'cmdline').read_bytes().split(b'\0')[0].decode()
-                if Path(name).name.lower() not in ('wechat', 'weixin'):
+                if Path(name).name.casefold() not in self.client.process_names:
                     continue
                 environment = (process / 'environ').read_bytes().split(b'\0')
                 for value in environment:
@@ -280,7 +284,7 @@ class PushService:
                 if message.message_type != MessageType.METHOD_CALL or message.interface != 'org.freedesktop.Notifications' or message.member != 'Notify':
                     return
                 values = message.body
-                if len(values) >= 5 and str(values[0]).casefold() in ('wechat', 'weixin', '微信', 'com.tencent.wechat', 'com.tencent.weixin'):
+                if len(values) >= 5 and self.accepts_notification(values[0]):
                     self.notify(values[3], values[4], (message.sender, message.serial))
                 # A monitor must never reply to another connection's method call.
                 return True

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Openbox sources autostart using /bin/sh, even when it has a Bash shebang.
+set -eu
+# Use the desktop session bus so desktop notifications can reach the push service.
+# A fixed device scale keeps drawing and X11 input in the same coordinate space.
+case "${QQ_UI_SCALE:-1}" in 1|2|3) ;; *) echo 'QQ_UI_SCALE must be 1, 2 or 3' >&2; exit 1;; esac
+exec /opt/QQ/qq --no-sandbox --disable-gpu --force-device-scale-factor="${QQ_UI_SCALE:-1}"

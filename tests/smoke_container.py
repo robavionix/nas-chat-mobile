@@ -40,7 +40,7 @@ with namespace['X']() as display:
     picture = display.grab(0, 0, 64, 64)
     assert picture.mode == 'RGB' and picture.size == (64, 64)
     windows = display.windows()
-    assert any(w['class'].lower() in ('wechat', 'weixin') for w in windows), windows
+    assert any(namespace['client'].matches(w) for w in windows), 'Selected chat client has no main window'
 
     # Verify native Xlib ABI, row stride and BGRX colour order on this architecture.
     library = namespace['_x']
