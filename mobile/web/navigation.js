@@ -140,6 +140,7 @@ function finishNavigationTransition(token,target){
 function navigationPicturePainted(){
   const token=navigationTransition,target=token?.target;
   if(!target||!mirror.ready||paintedVersion!==mirror.version||renderDirty)return;
+  if(!pictureLayoutMatches())return;
   if(box.conversation!==target.conversation||box.compactList!==target.list||mirror.layout?.conversation!==target.conversation||mirror.layout?.compactList!==target.list)return;
   if(token.optimistic){if(token.phase==='waiting-frame')cancelNavigationTransition(token,true);return}
   if(token.phase==='settling'){cancelNavigationTransition(token,token.completed);return}

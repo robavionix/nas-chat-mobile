@@ -22,7 +22,7 @@ from push_service import PushService
 class ClientTests(unittest.TestCase):
     def test_qq_offscreen_retina_window_does_not_capture_empty_rows(self):
         tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
-        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='qq_profile']
+        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('qq_profile','qq_send_button')]
         scope={'QQ_SCALE':3}
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'server.py','exec'),scope)
         class Display:
@@ -51,7 +51,7 @@ class ClientTests(unittest.TestCase):
 
     def test_qq_does_not_use_wechat_send_coordinates(self):
         source = ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
-        functions = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in ('layout', 'validated_chat','qq_profile')]
+        functions = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in ('layout', 'validated_chat','qq_profile','qq_send_button')]
         window = {'id': '1', 'class': 'QQ', 'name': 'QQ', 'override': False, 'types': set(),
                   'width': 1120, 'height': 900, 'x': 0, 'y': 0}
         class Display:
@@ -70,7 +70,7 @@ class ClientTests(unittest.TestCase):
 
     def test_qq_uses_verified_separators_and_independent_capture_regions(self):
         tree = ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
-        names = ('qq_profile','pane_region','input_point','send_point','target_rect')
+        names = ('qq_profile','qq_send_button','pane_region','input_point','send_point','target_rect')
         functions = [n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
         scope = {'time':time,'qq_geometry_cache':{},'QQ_SCALE':1,'Image':Image}
         exec(compile(ast.Module(body=functions,type_ignores=[]),'server.py','exec'),scope)
@@ -85,7 +85,7 @@ class ClientTests(unittest.TestCase):
                    'popups':[],'compactList':True,'chatReady':True}
         profile = scope['qq_profile'](Display(),current)
         self.assertIsNotNone(profile)
-        self.assertEqual(profile['list'],{'x':60,'y':40,'width':246,'height':856,'header':52})
+        self.assertEqual(profile['list'],{'x':60,'y':40,'width':246,'height':856,'header':52,'density':.86})
         self.assertEqual(profile['chat'],{'x':308,'y':40,'width':648,'height':649,'header':56,'headerWidth':450,'headerRight':190,'fillViewport':True})
         current.update(panes={key:profile[key] for key in ('list','chat')},inputPoint=profile['inputPoint'],sendPoint=profile['sendPoint'])
         self.assertEqual(scope['input_point'](current),[633,769])
@@ -120,7 +120,7 @@ class ClientTests(unittest.TestCase):
 
     def test_qq_group_sidebar_is_excluded_from_capture_and_send_coordinates(self):
         tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
-        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='qq_profile']
+        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('qq_profile','qq_send_button')]
         for scale in (1,2,3):
             with self.subTest(scale=scale):
                 scope={'time':time,'qq_geometry_cache':{},'QQ_SCALE':scale,'Image':Image}
@@ -148,7 +148,7 @@ class ClientTests(unittest.TestCase):
 
     def test_qq_three_times_dpi_measures_native_pixels(self):
         tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
-        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='qq_profile']
+        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('qq_profile','qq_send_button')]
         scope={'time':time,'qq_geometry_cache':{},'QQ_SCALE':3,'Image':Image}
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'server.py','exec'),scope)
         image=Image.new('RGB',(2880,2700),(245,245,245));draw=ImageDraw.Draw(image)
@@ -165,6 +165,43 @@ class ClientTests(unittest.TestCase):
         self.assertLessEqual(abs(profile['list']['width']-738),2)
         self.assertEqual(profile['sendPoint'],[2688,2604])
         self.assertLessEqual(abs(profile['chat']['height']-1947),2)
+
+    def test_qq_geometry_changes_without_waiting_for_cache_expiry(self):
+        tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))
+        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('qq_profile','qq_send_button','qq_capture_matches')]
+        for scale in (1,2,3):
+            with self.subTest(scale=scale):
+                scope={'time':time,'qq_geometry_cache':{},'QQ_SCALE':scale,'Image':Image}
+                exec(compile(ast.Module(body=nodes,type_ignores=[]),'server.py','exec'),scope)
+                image=Image.new('RGB',(1200*scale,1980*scale),(245,245,245));draw=ImageDraw.Draw(image)
+                draw.line((376*scale,40*scale,376*scale,1976*scale),fill=(235,235,235),width=scale)
+                draw.line((378*scale,1769*scale,1195*scale,1769*scale),fill=(235,235,235),width=scale)
+                draw.rectangle((1102*scale,1932*scale,1179*scale,1964*scale),fill=(0,153,255))
+                class Display:
+                    def grab(self,x,y,w,h):return image.crop((x,y,x+w,y+h))
+                display=Display();box={'id':'same-window','x':0,'y':0,'width':1200*scale,'height':1980*scale}
+                private=scope['qq_profile'](display,box)
+                self.assertTrue(private['editorReady']);self.assertEqual(private['sidebarWidth'],0)
+                current=box|private|{'client':'qq','uiScale':scale,'compactList':False,'popups':[]}
+                self.assertTrue(scope['qq_capture_matches'](display,current))
+                draw.rectangle((1016*scale,96*scale,1200*scale,1980*scale),fill=(245,245,245))
+                draw.line((1016*scale,96*scale,1016*scale,1976*scale),fill=(235,235,235),width=scale)
+                draw.rectangle((918*scale,1932*scale,995*scale,1964*scale),fill=(0,153,255))
+                # A coincident blue pixel in a member avatar cannot validate
+                # the previous private-chat send-button position.
+                draw.point(tuple(private['sendPoint']),fill=(0,153,255))
+                self.assertFalse(scope['qq_capture_matches'](display,current))
+                group=scope['qq_profile'](display,box)  # no manual cache clear
+                self.assertTrue(group['editorReady']);self.assertGreater(group['sidebarWidth'],180*scale)
+                self.assertLess(group['chat']['width'],private['chat']['width'])
+                self.assertTrue(scope['qq_capture_matches'](display,current|group))
+                # Return to private without expiring/clearing the group cache.
+                draw.rectangle((1015*scale,96*scale,1200*scale,1980*scale),fill=(245,245,245))
+                draw.line((378*scale,1769*scale,1195*scale,1769*scale),fill=(235,235,235),width=scale)
+                draw.rectangle((918*scale,1932*scale,995*scale,1964*scale),fill=(245,245,245))
+                draw.rectangle((1102*scale,1932*scale,1179*scale,1964*scale),fill=(0,153,255))
+                restored=scope['qq_profile'](display,box)
+                self.assertTrue(restored['editorReady']);self.assertEqual(restored['sidebarWidth'],0)
 
     def test_qq_blank_loading_page_cannot_keep_previous_recipient(self):
         tree=ast.parse(Path('mobile/server.py').read_text(encoding='utf-8'))

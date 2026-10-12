@@ -30,7 +30,18 @@ function drawDesktop(context,x,y,width,height,dx,dy,dw,dh){
 // the Retina viewport, and can continue while the next strips are decoding.
 function scrollGeometry(part,dpr){
   return JSON.stringify([box.id,box.conversation,view,mobilePaneRegion(box,view),panes.scale,dpr,
-    mobileCanvas.width,mobileCanvas.height,part.dx||0,part.dy,part.width,part.height]);
+    mobileCanvas.width,mobileCanvas.height,part.dx||0,part.dw,part.fillEdges,part.dy,part.width,part.height]);
+}
+function drawPaneSection(context,part,outputWidth,scale){
+  const dx=part.dx||0,dw=part.dw||outputWidth,dh=part.height*scale;
+  if(part.fillEdges){
+    // Extend each row's own background, including full-width selection. Text
+    // and avatars retain their aspect ratio and exact native touch mapping.
+    const inset=part.edgeInset||4;
+    drawDesktop(context,part.x+inset,part.y,1,part.height,0,part.dy,dx,dh);
+    drawDesktop(context,part.x+part.width-inset-1,part.y,1,part.height,dx+dw,part.dy,outputWidth-dx-dw,dh);
+  }
+  return drawDesktop(context,part.x,part.y,part.width,part.height,dx,part.dy,dw,dh);
 }
 function positionScrollBody(part,dpr){
   if(!scrollCache||scrollCache.geometry!==scrollGeometry(part,dpr)||part.y<scrollCache.top-1e-6||part.y+part.height>scrollCache.top+scrollCache.height+1e-6)return false;
@@ -44,17 +55,17 @@ function positionScrollBody(part,dpr){
   const dy=Math.round(part.dy*dpr),rows=Math.round((part.dy+part.height*panes.scale)*dpr)-dy;
   const sourceY=Math.max(0,Math.min(scrollBodyCanvas.height-rows,Math.round((part.y-scrollCache.top)*panes.scale*dpr)));
   const clipStyle=scrollClip.style,bodyStyle=scrollBodyCanvas.style;
-  const values={left:(part.dx||0)+'px',top:dy/dpr+'px',width:(part.dw||panes.width)+'px',height:rows/dpr+'px'};
+  const values={left:'0px',top:dy/dpr+'px',width:panes.width+'px',height:rows/dpr+'px'};
   for(const [key,value] of Object.entries(values))if(clipStyle[key]!==value)clipStyle[key]=value;
   bodyStyle.width=scrollBodyCanvas.width/dpr+'px';bodyStyle.height=scrollBodyCanvas.height/dpr+'px';
   bodyStyle.transform=`translate3d(0,${-sourceY/dpr}px,0)`;
-  scrollCache.crop={sourceY,rows,dy,dpr,dx:part.dx||0,dw:part.dw||panes.width};
+  scrollCache.crop={sourceY,rows,dy,dpr,dx:0,dw:panes.width};
   return true;
 }
 function drawScrollBody(part,dpr){
   if(box.client!=='qq'||popupActive()||!box.chatReady)return false;
   const region=mobilePaneRegion(box,view),top=region.y+region.header,height=region.height-region.header;
-  const scale=panes.scale*dpr,width=Math.round(part.width*scale);
+  const scale=panes.scale*dpr,width=Math.round(panes.width*dpr);
   const limit=Math.min(8192,Math.floor(8*1024*1024/width));
   const captured=Math.min(height,Math.floor(limit/scale)),pixels=Math.ceil(captured*scale);
   if(width<1||pixels<1||captured+1e-6<part.height){if(scrollCache)releaseScrollCache();return false}
@@ -65,7 +76,8 @@ function drawScrollBody(part,dpr){
     if(scrollBodyCanvas.height!==pixels)scrollBodyCanvas.height=pixels;
     scrollBodyContext.imageSmoothingQuality='high';
     scrollBodyContext.fillStyle='#f4f4f4';scrollBodyContext.fillRect(0,0,width,pixels);
-    if(!drawDesktop(scrollBodyContext,region.x,origin,region.width,captured,0,0,width,captured*scale))return false;
+    const cached={...part,x:region.x,y:origin,width:region.width,height:captured,dy:0,dx:(part.dx||0)*dpr,dw:(part.dw||panes.width)*dpr};
+    if(!drawPaneSection(scrollBodyContext,cached,width,scale))return false;
     scrollCache={key,geometry:scrollGeometry(part,dpr),top:origin,height:captured};
   }
   return positionScrollBody(part,dpr);
@@ -384,13 +396,24 @@ function findContentBottom(now){
   if(following)localOffset=0;
   if(contentBottom===null||Math.abs(next-contentBottom)>8*s||(following&&panes&&panes.start!==panes.base)){contentBottom=next;fitMobilePicture()}
 }
+function pictureLayoutMatches(){
+  const captured=mirror.layout;
+  if(!captured)return true;
+  if(captured.conversation!==box.conversation||captured.compactList!==box.compactList||captured.popups?.[0]?.id!==box.popups?.[0]?.id)return false;
+  if(box.client==='qq'&&box.chatReady&&!popupActive()){
+    if(JSON.stringify(captured.panes)!==JSON.stringify(box.panes))return false;
+    const region=mobilePaneRegion(box,view);
+    if(JSON.stringify(mirror.rect)!==JSON.stringify([region.x,region.y,region.width,region.height]))return false;
+  }
+  return true;
+}
 function paintMobile(now){
   requestAnimationFrame(paintMobile);
   if(!box||view==='full'||document.hidden)return;
   if(typeof navigationAnimationRunning==='function'&&navigationAnimationRunning())return;
   const waiting=document.querySelector('#waiting');
   // An HTTP layout can beat its screenshot. Never crop the old chat using the new layout.
-  if(mirror.layout&&(mirror.layout.conversation!==box.conversation||mirror.layout.compactList!==box.compactList||mirror.layout.popups?.[0]?.id!==box.popups?.[0]?.id))return;
+  if(!pictureLayoutMatches())return;
   if(!renderDirty&&panes&&paintedVersion===mirror.version)return;
   // Finger movement uses only a complete cached body. Never expose the native
   // mirror while a delta is being applied, including its partially decoded rows.
@@ -414,7 +437,7 @@ function paintMobile(now){
     for(const [index,part] of panes.sections.entries()){
       if(index===panes.sections.length-1&&drawScrollBody(part,dpr))continue;
       pictureContext.imageSmoothingQuality='high';
-      drawDesktop(pictureContext,part.x,part.y,part.width,part.height,part.dx||0,part.dy,part.dw||panes.width,part.height*(part.scale||panes.scale));
+      drawPaneSection(pictureContext,part,panes.width,part.scale||panes.scale);
     }
     renderDirty=false;paintedVersion=mirror.version;
     waiting.classList.add('hidden');

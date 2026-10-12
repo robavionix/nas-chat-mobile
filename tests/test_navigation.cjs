@@ -9,7 +9,7 @@ function setup(reduced=false){
   const screen=element();screen.getBoundingClientRect=()=>({left:0,top:60,width:390,height:600});
   const mobileCanvas=element();mobileCanvas.width=1170;mobileCanvas.getBoundingClientRect=screen.getBoundingClientRect;
   const context={screen,mobileCanvas,devicePixelRatio:3,view:'list',box:{conversation:'1:list',compactList:true},mirror:{ready:true,version:4,layout:{conversation:'1:list',compactList:true}},paintedVersion:4,renderDirty:false,
-    popupActive:()=>false,Event,Promise,
+    popupActive:()=>false,pictureLayoutMatches:()=>true,Event,Promise,
     setTimeout(fn){timers.set(++timerId,fn);return timerId},clearTimeout(id){timers.delete(id)},
     document:{hidden:false,body:element(),createElement:element,addEventListener(name,fn){listeners[name]=fn}},
     window:{matchMedia:()=>({matches:reduced}),dispatchEvent(){},addEventListener(name,fn){listeners[name]=fn}}};
@@ -73,7 +73,7 @@ async function exercise(reduced=false){
   c.box=list;c.mirror.layout=list;c.renderDirty=false;finished=c.finishNavigationTransition(token,list);
   assert.equal(await finished,true);assert.equal(animations.length,countBefore+2,'a late frame must not start a second slide');
   const render=fs.readFileSync('mobile/web/render.js','utf8');
-  const paint=render.slice(render.indexOf('function paintMobile(now){'),render.lastIndexOf('requestAnimationFrame(paintMobile);'));
+  const paint=render.slice(render.indexOf('function pictureLayoutMatches(){'),render.lastIndexOf('requestAnimationFrame(paintMobile);'));
   let clears=0,painted=0;
   Object.assign(c,{requestAnimationFrame(){},view:'chat',box:{conversation:'new',compactList:false,popups:[]},mirror:{ready:true,version:8,layout:{conversation:'old',compactList:false,popups:[]}},
     panes:{width:390,height:600,sections:[]},scrollCache:null,scrollClip:null,renderDirty:true,visualPending:false,paintedVersion:7,
@@ -84,5 +84,14 @@ async function exercise(reduced=false){
   assert.equal(clears,0,'a new layout must not clear or crop an old conversation frame');
   c.mirror.layout=c.box;c.paintMobile(1);
   assert.equal(clears,1);assert.equal(painted,1);assert.equal(c.paintedVersion,8);
+  const region={x:1135,y:120,width:2502,height:5187};
+  c.box={...c.box,client:'qq',chatReady:true,panes:{chat:region}};
+  c.mobilePaneRegion=()=>region;c.renderDirty=true;
+  c.mirror.layout={...c.box,panes:{chat:{...region,width:3053}}};c.mirror.rect=[1135,120,3053,5187];
+  c.paintMobile(2);assert.equal(clears,1,'same conversation with a stale private/group crop cannot paint');
+  c.mirror.layout=c.box;c.paintMobile(3);assert.equal(clears,1,'matching metadata alone cannot validate stale captured pixels');
+  c.mirror.rect=[1135,120,2502,5187];c.paintMobile(4);assert.equal(clears,2);
+  c.box={client:'qq',chatReady:false,compactList:false,conversation:null,popups:[]};c.mirror.layout=c.box;c.renderDirty=true;
+  c.paintMobile(5);assert.equal(clears,3,'QQ login/startup window must still paint without phone panes');
   console.log('PASS painted target gating, native-density snapshot, linear slide, reduced motion, resize, timeout and no-op cleanup');
 })().catch(error=>{console.error(error);process.exitCode=1});

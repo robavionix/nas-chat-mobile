@@ -48,3 +48,15 @@ for(const [width,height] of [[320,440],[390,700],[430,780]]){
   assert.ok(Math.abs((p.start-q.start)*p.scale-100)<1e-6);
   assert.equal(panePosition(q,width/2,before.dy+20).y,Math.round(q.start+20/q.scale));
 }
+for(const width of [320,390,430]){
+  const regular={uiScale:3,panes:{list:{x:180,y:120,width:949,height:5808,header:156}}};
+  const dense={uiScale:3,panes:{list:{...regular.panes.list,density:.86}}};
+  const p=mobilePanes(dense,'list',width,700),previous=mobilePanes(regular,'list',width,700),body=p.sections.at(-1);
+  assert.equal(p.width,width);assert.equal(p.headerHeight,previous.headerHeight,'search controls keep their readable size');
+  assert.ok(Math.abs(p.scale/previous.scale-.86)<1e-6);
+  assert.ok(body.height>previous.sections.at(-1).height,'smaller list text exposes more rows');
+  assert.ok(Math.abs(body.dx+body.dw/2-width/2)<1e-6);
+  assert.equal(panePosition(p,width/2,body.dy+30).x,655);
+  assert.equal(panePosition(p,1,body.dy+30).x,180,'left background gutter selects the same native row');
+  assert.equal(panePosition(p,width-1,body.dy+30).x,1128,'right background gutter stays inside the native list');
+}

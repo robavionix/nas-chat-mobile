@@ -300,6 +300,22 @@ def detect_split(x, box):
     return result
 
 
+def qq_send_button(display, point, scale):
+    """Check the button footprint, not a lone blue avatar/sidebar pixel."""
+    x, y = point
+    pixels = display.grab(x-18*scale,y,36*scale+1,8*scale+1)
+    colors = [pixels.getpixel(p) for p in ((18*scale,0),(0,8*scale),(36*scale,8*scale))]
+    return all(b > 200 and g > 100 and b-r > 25 and g-r > 15 for r,g,b in colors)
+
+
+def qq_capture_matches(display, current):
+    # A stream keeps its layout between captures. Reject a frame if a private /
+    # group switch or resize has moved the editor since that layout was read.
+    return (current.get('client') != 'qq' or current.get('compactList') or current.get('popups')
+            or not current.get('editorReady')
+            or qq_send_button(display,current['sendPoint'],current.get('uiScale',1)))
+
+
 def qq_profile(display, box):
     """Find the QQ column/editor separators, rather than reusing WeChat points."""
     scale = QQ_SCALE
@@ -310,8 +326,14 @@ def qq_profile(display, box):
         return None
     key = (box['id'], box['x'], box['y'], box['width'], box['height'])
     cached = qq_geometry_cache.get(key)
-    if cached and time.monotonic() - cached[0] < 2:
-        return cached[1]
+    if cached:
+        profile = cached[1]
+        age = time.monotonic()-cached[0]
+        if profile and profile['editorReady']:
+            if age < 2 and qq_send_button(display,profile['sendPoint'],scale):
+                return profile
+        elif age < .12:
+            return profile
     left, right = 200*scale, min(520*scale, box['width'] - 360*scale)
     rows = [display.grab(box['x'] + left, box['y'] + y, right-left, 1).convert('L').tobytes()
             for y in (80*scale, box['height']-120*scale)]
@@ -347,7 +369,7 @@ def qq_profile(display, box):
                     content_right = divider
         # A newly logged-in QQ has a conversation column but no selected chat,
         # so there is no editor/send button yet. The list must work on its own.
-        result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale},
+        result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale,'density':.86},
                   'chat': {'x':box['x']+split+2*scale,'y':box['y']+40*scale,'width':content_right-split-6*scale,
                            'height':box['height']-44*scale,'header':56*scale,
                            'headerWidth':450*scale,'headerRight':190*scale if content_right==box['width'] else 0,'fillViewport':True},
@@ -368,8 +390,7 @@ def qq_profile(display, box):
                 low,high = image.crop((0,y,width,y+1)).getextrema()
                 if high-low < 10:
                     candidates.append(y)
-        button = display.grab(box['x']+content_right-64*scale,box['y']+box['height']-32*scale,1,1).getpixel((0,0))
-        if candidates and button[2] > 200 and button[1] > 100 and button[2]-button[0] > 25 and button[1]-button[0] > 15:
+        if candidates and qq_send_button(display,[box['x']+content_right-64*scale,box['y']+box['height']-32*scale],scale):
             editor = start+min(candidates, key=lambda y: abs(start+y-(box['height']-211*scale)))
             if editor <= box['height']-140*scale:
                 result['chat']['height'] = editor-40*scale
@@ -462,10 +483,10 @@ def layout():
                 # QQ's empty landing page does not reflow its column correctly
                 # until a chat is selected. Keep that first list at its saved
                 # size; fit the real chat before returning the navigation reply.
-                # A slightly wider column reduces the phone UI scale. The tall
-                # QQ desktop leaves history outside the local viewport so a
-                # drag can use cached pixels while remote scrolling catches up.
-                box['preferredWidth'] = 1250*QQ_SCALE+profile['sidebarWidth'] if profile['editorReady'] else box['width']
+                # Chat text and list density have independent scales. Reflow a
+                # narrower native chat instead of clipping enlarged bubbles.
+                # The tall desktop retains history for local composited drags.
+                box['preferredWidth'] = 1100*QQ_SCALE+profile['sidebarWidth'] if profile['editorReady'] else box['width']
         elif box['compact']:
             box['compactList'], box['conversation'] = inspect_main(x, box, bool(popups))
             box['split'] = 104
@@ -896,7 +917,14 @@ class Handler(BaseHTTPRequestHandler):
             rect, name = found
             key = name + ':' + ','.join(map(str, rect))
             with X() as x:
-                data, width, height, stride = x.raw(*rect)
+                matches = qq_capture_matches(x,current)
+                if matches:
+                    data, width, height, stride = x.raw(*rect)
+                    matches = qq_capture_matches(x,current)
+            if not matches:
+                qq_geometry_cache.clear()
+                current, checked = layout(), time.monotonic()
+                continue
             # Compare raw strips; only changed strips are converted and encoded.
             crcs = [zlib.crc32(data[i:i + BAND * stride]) for i in range(0, len(data), BAND * stride)]
             counter, versions = mirror_state(key, crcs)
@@ -1012,7 +1040,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     rect, name = found
                     with X() as x:
-                        data, width, height, stride = x.raw(*rect)
+                        matches = qq_capture_matches(x,current)
+                        if matches:
+                            data, width, height, stride = x.raw(*rect)
+                            matches = qq_capture_matches(x,current)
+                    if not matches:
+                        qq_geometry_cache.clear()
+                        current, checked = layout(), now
+                        continue
                     pixels, body = memoryview(data), max(1, width - EDGE) * 4
                     rows = [zlib.crc32(pixels[i * stride:i * stride + body]) for i in range(height)]
                     edges = [zlib.crc32(pixels[i * stride + body:i * stride + width * 4]) for i in range(height)]
