@@ -4,8 +4,8 @@
 'use strict';
 (() => {
   const $ = s => document.querySelector(s);
-  const view = $('#view'), ctx = view.getContext('2d'), composer = $('#composer'), draft = $('#draft');
-  const sendButton = $('#send'), attach = $('#attach'), picker = $('#picker'), toast = $('#toast');
+  const view = $('#view'), ctx = view.getContext('2d'), draft = $('#draft');
+  const attach = $('#attach'), picker = $('#picker'), toast = $('#toast');
   const mirror = document.createElement('canvas'), mctx = mirror.getContext('2d');
   const shift = document.createElement('canvas'), sctx = shift.getContext('2d');
   const LAN = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
@@ -16,7 +16,7 @@
   const INPUT = 258, TOOLBAR = 56, HEADER = 90;
   // `rect` is the captured screen area; the picture may be reduced by `unit` (QQ at triple scale).
   let box = null, rect = null, size = null, unit = 1, key = null, fit = null, epoch = 0, socket = null, retry = 0;
-  let busy = false, pendingSend = null, paintQueued = false, toastTimer = 0, tapChain = Promise.resolve(), usingLan = false;
+  let busy = false, paintQueued = false, toastTimer = 0, tapChain = Promise.resolve(), usingLan = false;
 
   try { const v = new URLSearchParams(location.search).get('view'); if (v) localStorage.setItem('nas-chat-view', v); } catch {}
 
@@ -47,7 +47,8 @@
     if (next.clientLabel && !document.body.dataset.label && label !== next.clientLabel) {
       label = next.clientLabel; document.title = label + ' · 电脑视图'; document.body.dataset.client = next.client || '';
     }
-    placeComposer();
+    placeDraft();
+    if (syncBack && !next.popups?.length) { syncBack = false; setTimeout(() => readNative(true), 150); }
     // Viewers, dialogs and menus get a visible way back, besides Esc.
     const popup = box.popups?.[0], bar = $('#popupbar');
     bar.hidden = !popup;
@@ -114,7 +115,7 @@
   }
   async function connect() {
     if (document.hidden) return;
-    const my = ++epoch, aspect = (innerHeight / Math.max(1, innerWidth)).toFixed(3);
+    const my = ++epoch, aspect = shape().toFixed(3);
     // At home the picture may come straight from the NAS; the page itself stays on this address.
     const lan = await globalThis.nasLan?.stream();
     if (my !== epoch || document.hidden) return;
@@ -177,16 +178,17 @@
   function schedulePaint() { if (!paintQueued) { paintQueued = true; requestAnimationFrame(paint); } }
   function paint() {
     paintQueued = false;
-    const dpr = devicePixelRatio || 1, w = innerWidth, h = innerHeight;
+    // The layout viewport, which the canvas fills: an on-screen keyboard shrinks innerHeight but not this.
+    const dpr = devicePixelRatio || 1, w = document.documentElement.clientWidth, h = document.documentElement.clientHeight;
     const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
     if (view.width !== pw || view.height !== ph) { view.width = pw; view.height = ph; }
     ctx.fillStyle = '#e9edf1'; ctx.fillRect(0, 0, pw, ph);
-    if (!rect || !key) { fit = null; placeComposer(); return; }
+    if (!rect || !key) { fit = null; placeDraft(); return; }
     const scale = Math.min(w / size[0], h / size[1]), dw = size[0] * scale, dh = size[1] * scale;
     fit = {scale, left: (w - dw) / 2, top: (h - dh) / 2};
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(mirror, 0, 0, size[0], size[1], fit.left * dpr, fit.top * dpr, dw * dpr, dh * dpr);
-    placeComposer();
+    placeDraft();
   }
   function toScreen(cx, cy) {
     if (!fit || !rect) return null;
@@ -206,53 +208,143 @@
     return {x: box.x + box.split + 2, y: box.y + 48, width: Math.min(900, box.width - box.split - 2), height: HEADER};
   }
 
-  // ---- composer laid over WeChat's own text box ----
-  function placeComposer() {
-    const area = inputArea();
-    if (!area) { composer.hidden = true; return; }
-    if (composer.dataset.open !== '1') { composer.hidden = true; return; }
-    const a = toClient(area.x, area.y), b = toClient(area.x + area.width, area.y + area.height);
-    Object.assign(composer.style, {left: a.x + 'px', top: a.y + 'px', width: (b.x - a.x) + 'px', height: (b.y - a.y) + 'px',
-      fontSize: Math.max(13, Math.min(18, (box.uiScale ? 15 * box.uiScale : 26) / unit * fit.scale)) + 'px'});
-    composer.hidden = false;
-    controls();
+  // ---- typing: a local text box laid exactly over the client's own typing area ----
+  // Typing stays on this computer (instant, with its own input method). The box takes the client's
+  // background, font size and position, found in the live picture, so it reads as the client's own.
+  // Sending uses the checked send action; each chat keeps its own draft.
+  const drafts = new Map();
+  let typing = null, draftChat = null, inputScan = {key: '', at: 0, value: null}, syncBack = false, busySync = false;
+  function controls() { attach.disabled = busy; draft.readOnly = busy; }
+  function pixelRows(x, y0, y1) {
+    // One picture column as luminance values, screen rows y0..y1 (top to bottom).
+    const px = Math.round((x - rect[0]) / unit), top = Math.round((y0 - rect[1]) / unit), height = Math.round((y1 - y0) / unit);
+    if (px < 0 || px >= mirror.width || top < 0 || height <= 0 || top + height > mirror.height) return null;
+    const data = mctx.getImageData(px, top, 1, height).data, out = [];
+    for (let i = 0; i < data.length; i += 4) out.push([data[i], data[i + 1], data[i + 2]]);
+    return out;
   }
-  function openComposer() {
-    if (!inputArea()) return false;
-    composer.dataset.open = '1'; placeComposer(); draft.focus();
-    return true;
+  const luminance = ([r, g, b]) => .299 * r + .587 * g + .114 * b;
+  function wechatSeparator(left, right, bottom) {
+    // The thin grey line between the messages and the input box: most columns darker than the box itself.
+    const columns = [], span = right - left;
+    for (let i = 1; i <= 24; i++) {
+      const values = pixelRows(left + span * (.08 + .84 * i / 25), bottom - 620, bottom - 70);
+      if (values) columns.push(values);
+    }
+    if (columns.length < 12) return null;
+    const rows = columns[0].length, base = luminance(columns[0][rows - 40]);
+    for (let y = rows - 60; y > 8; y--) {
+      const dark = columns.filter(column => luminance(column[y]) <= base - 14 && luminance(column[y]) >= base - 60).length;
+      if (dark >= columns.length * .6) return bottom - 620 + (y + 1) * unit;
+    }
+    return null;
   }
-  function closeComposer() { composer.dataset.open = ''; composer.hidden = true; view.focus(); }
-  function controls() {
-    sendButton.disabled = busy || !draft.value.trim(); attach.disabled = busy;
-    sendButton.textContent = busy ? '发送中' : '发送';
+  function nativeInput() {
+    if (!fit || !box || !box.chatReady || box.popups?.length || box.inlineDialog || !rect) return null;
+    let text, send;
+    if (box.client === 'qq') {
+      if (!box.editorRect) return null;
+      const [x, y, width, height] = box.editorRect, s = box.uiScale || 1;
+      text = {x: x + 10 * s, y: y + 2 * s, width: width - 20 * s, height: height - 56 * s};
+      send = {x: x + width - 150 * s, y: y + height - 54 * s, width: 150 * s, height: 54 * s};
+    } else {
+      if (box.compact || !box.split) return null;
+      const left = box.x + box.split + 2, right = box.x + box.width - 20, bottom = box.y + box.height;
+      const scanKey = [box.id, box.width, box.height, box.split, box.conversation].join(':');
+      if (inputScan.key !== scanKey || performance.now() - inputScan.at > 1500) {
+        inputScan = {key: scanKey, at: performance.now(), value: wechatSeparator(left, right, bottom)};
+      }
+      const top = inputScan.value ?? bottom - 243;
+      text = {x: left + 18, y: top + 8, width: right - left - 36, height: bottom - 86 - (top + 8)};
+      send = {x: right - 230, y: bottom - 86, width: 230, height: 86};
+    }
+    if (text.width < 60 || text.height < 24) return null;
+    return {text, send, area: {x: text.x - 18, y: text.y - 8, width: text.width + 36, height: send.y + send.height - text.y + 8}};
   }
-  draft.addEventListener('input', () => { pendingSend = null; controls(); });
-  draft.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendDraft(); }
-    else if (e.key === 'Escape') { e.preventDefault(); if (!draft.value) closeComposer(); else view.focus(); }
-  });
-  draft.addEventListener('blur', () => { if (!draft.value && !busy) setTimeout(() => { if (document.activeElement !== draft && !draft.value) closeComposer(); }, 150); });
-  sendButton.addEventListener('mousedown', e => e.preventDefault());
-  sendButton.onclick = () => sendDraft();
-  async function sendDraft() {
-    const text = draft.value;
-    if (busy || !text.trim()) return;
-    if (!box?.conversation) return message('请先在左侧选择聊天', true);
-    if (!pendingSend || pendingSend.text !== text || pendingSend.window !== box.id || pendingSend.conversation !== box.conversation)
-      pendingSend = {text, mode: 'enter', window: box.id, conversation: box.conversation, requestId: crypto.randomUUID()};
-    const attempt = pendingSend;
-    busy = true; draft.value = ''; message('发送中…'); controls();
+  function backgroundOf(area) {
+    const values = pixelRows(area.x + 6, area.y + 4, area.y + 12);
+    if (!values) return '#fafafa';
+    const [r, g, b] = values[values.length - 1];
+    return `rgb(${r},${g},${b})`;
+  }
+  function placeDraft() {
+    typing = nativeInput();
+    if (!typing) { draft.hidden = true; return; }
+    const a = toClient(typing.text.x, typing.text.y), b = toClient(typing.text.x + typing.text.width, typing.text.y + typing.text.height);
+    const font = (box.client === 'qq' ? 14 * (box.uiScale || 1) : 24.5) / unit * fit.scale;
+    Object.assign(draft.style, {left: a.x + 'px', top: a.y + 'px', width: (b.x - a.x) + 'px', height: (b.y - a.y) + 'px',
+      fontSize: Math.max(12, font) + 'px', background: backgroundOf(typing.text)});
+    draft.hidden = false;
+    if (draftChat !== box.conversation) switchDraft();
+  }
+  function switchDraft() {
+    if (draftChat) drafts.set(draftChat, draft.value);
+    draftChat = box.conversation;
+    draft.value = drafts.get(draftChat) || '';
+    if (!draft.value) readNative(false);
+  }
+  function hasInk(region) {
+    // Whether the client's own box already holds something (a draft typed on a phone, a picked emoji).
+    let ink = 0;
+    for (let i = 1; i <= 10; i++) {
+      const values = pixelRows(region.x + region.width * i / 11, region.y, region.y + Math.min(region.height, 120));
+      if (values) { const base = luminance(values[0]); ink += values.filter(v => luminance(v) < base - 80).length; }
+    }
+    return ink > 6;
+  }
+  async function readNative(force) {
+    if (busySync || !typing || !box?.conversation || (!force && !hasInk(typing.text))) return;
+    busySync = true;
+    const chat = box.conversation;
     try {
-      const result = await call('send', attempt);
-      pendingSend = null; message('');
-      if (result.layout) acceptLayout(result.layout);
-    } catch (error) {
-      if (error.layout) acceptLayout(error.layout);
-      if (!draft.value) { draft.value = attempt.text; pendingSend = attempt; }
-      message(error.message, true);
-    } finally { busy = false; controls(); if (composer.dataset.open === '1') draft.focus(); }
+      const result = await call('input', {action: 'read', window: box.id, conversation: chat});
+      if (chat === draftChat && typeof result.text === 'string' && result.text !== draft.value) {
+        draft.value = result.text; drafts.set(chat, draft.value);
+        draft.setSelectionRange(draft.value.length, draft.value.length);
+      }
+    } catch {} finally { busySync = false; }
   }
+  async function writeNative() {
+    // Before a native button (emoji and the like), the client's box gets what was typed here.
+    if (!box?.conversation) return;
+    await call('input', {action: 'write', text: draft.value, window: box.id, conversation: box.conversation});
+    syncBack = true;
+  }
+  function focusDraft() { if (!draft.hidden) { draft.focus({preventScroll: true}); return true; } return false; }
+  draft.addEventListener('input', () => { if (draftChat) drafts.set(draftChat, draft.value); });
+  draft.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendDraft(); }
+    else if (e.key === 'Escape') { e.preventDefault(); draft.blur(); }
+  });
+  // Sending clears the box at once and the next message can be typed straight away; messages go out
+  // one after another in the background. One that fails returns to its chat's box, ahead of anything
+  // typed since, and sending the same text again reuses its request, so the server never sends it twice.
+  const failed = new Map();
+  let sendChain = Promise.resolve();
+  function sendDraft() {
+    const text = draft.value;
+    if (!text.trim()) return;
+    if (!box?.conversation) return message('请先在左侧选择聊天', true);
+    const chat = box.conversation, previous = failed.get(chat);
+    const attempt = previous && previous.text === text && previous.window === box.id ? previous
+      : {text, mode: 'enter', window: box.id, conversation: chat, requestId: crypto.randomUUID()};
+    failed.delete(chat); draft.value = ''; drafts.delete(chat);
+    sendChain = sendChain.then(async () => {
+      try {
+        const result = await call('send', attempt);
+        if (result.layout) acceptLayout(result.layout);
+      } catch (error) {
+        if (error.layout) acceptLayout(error.layout);
+        failed.set(chat, attempt);
+        const kept = draftChat === chat ? draft.value : (drafts.get(chat) || '');
+        const restored = attempt.text + (kept ? '\n' + kept : '');
+        if (draftChat === chat) { draft.value = restored; draft.setSelectionRange(attempt.text.length, attempt.text.length); }
+        else drafts.set(chat, restored);
+        message(error.message + (draftChat === chat ? '' : '（内容已放回原聊天的输入框）'), true);
+      }
+    });
+  }
+  const inside = (p, r) => r && p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height;
 
   // ---- mouse ----
   function ripple(x, y) {
@@ -273,29 +365,40 @@
       } catch (error) { if (error.layout) acceptLayout(error.layout); message(error.message, true); }
     });
   }
-  view.addEventListener('mousedown', e => { if (e.button === 0) e.preventDefault(); view.focus(); });
+  view.addEventListener('mousedown', e => { if (e.button === 0) e.preventDefault(); });
   view.addEventListener('click', e => {
+    // Finger taps are handled by the touch code below; the browser's own click after them is ignored.
     // The second click of a double-click is sent as one native double-click (QQ previews), or dropped.
-    if (e.detail > 1) return;
+    if (lastPointer === 'touch' || e.detail > 1) return;
     const p = toScreen(e.clientX, e.clientY); if (!p) return;
-    const area = inputArea();
-    if (area && p.x >= area.x && p.x < area.x + area.width && p.y >= area.y && p.y < area.y + area.height) { openComposer(); return; }
-    tap(p, 1, e);
+    handleClick(p, e);
   });
+  function handleClick(p, e, clicks = 1) {
+    if (clicks > 1) { tap(p, 1, e, clicks); return; }
+    if (typing && inside(p, typing.send) && draft.value.trim()) { sendDraft(); return; }
+    if (typing && inside(p, typing.area) && !inside(p, typing.send)) {
+      // A native button below the text (emoji and the like) works on the client's own box: hand it what was
+      // typed here first, and read the box back once the button's panel closes.
+      (draft.value ? writeNative() : Promise.resolve()).then(() => { syncBack = true; tap(p, 1, e); }, error => message(error.message, true));
+      return;
+    }
+    tap(p, 1, e);
+  }
   view.addEventListener('dblclick', e => {
-    if (box?.client !== 'qq') return;
-    const p = toScreen(e.clientX, e.clientY), area = inputArea();
-    if (p && !(area && p.x >= area.x && p.x < area.x + area.width && p.y >= area.y && p.y < area.y + area.height)) tap(p, 1, e, 2);
+    if (box?.client !== 'qq' || lastPointer === 'touch') return;
+    const p = toScreen(e.clientX, e.clientY);
+    if (p) tap(p, 1, e, 2);
   });
   view.addEventListener('contextmenu', e => {
     e.preventDefault();
+    if (lastPointer === 'touch') return;
     const p = toScreen(e.clientX, e.clientY); if (p) tap(p, 3, e);
   });
   let wheelCarry = 0, wheelPoint = null, wheelBusy = false;
   view.addEventListener('wheel', e => {
     e.preventDefault();
     const p = toScreen(e.clientX, e.clientY); if (!p) return;
-    wheelPoint = p; wheelCarry += e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? innerHeight : 1);
+    wheelPoint = p; wheelCarry += e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? document.documentElement.clientHeight : 1);
     flushWheel();
   }, {passive: false});
   async function flushWheel() {
@@ -307,6 +410,59 @@
     if (Math.abs(wheelCarry) >= 64) flushWheel(); else wheelCarry = 0;
   }
 
+  // ---- touch (iPad fingers): tap clicks, long press opens the menu, a drag scrolls, a flick keeps scrolling ----
+  // Magic Keyboard trackpads arrive as mouse pointers and keep the mouse handling above.
+  const LONG_PRESS = 480, TOUCH_STEP = 120;
+  let lastPointer = 'mouse', touch = null, coastFrame = 0, lastTap = null;
+  view.addEventListener('pointerdown', e => { lastPointer = e.pointerType; }, {capture: true});
+  function scrollBy(delta, cx, cy) {
+    const p = toScreen(cx, cy); if (!p) return;
+    // One remote wheel step moves the client further than a finger; scale the drag to match.
+    wheelPoint = p; wheelCarry += delta * 64 / TOUCH_STEP; flushWheel();
+  }
+  function coast(velocity, cx, cy) {
+    let v = Math.max(-3, Math.min(3, velocity)), last = performance.now(), start = last;
+    const tick = now => {
+      const dt = Math.max(0, Math.min(32, now - last)); last = now; v *= Math.pow(.95, dt / 16);
+      scrollBy(-v * dt, cx, cy);
+      if (Math.abs(v) > .05 && now - start < 1200) coastFrame = requestAnimationFrame(tick);
+    };
+    coastFrame = requestAnimationFrame(tick);
+  }
+  view.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch') return;
+    e.preventDefault(); cancelAnimationFrame(coastFrame);
+    if (touch) { touch.multi = true; clearTimeout(touch.timer); return; }
+    const t = touch = {id: e.pointerId, x: e.clientX, y: e.clientY, lastY: e.clientY, lastT: performance.now(), v: 0, moved: false, long: false, multi: false};
+    t.timer = setTimeout(() => {
+      if (touch !== t || t.moved || t.multi) return;
+      t.long = true;
+      const p = toScreen(t.x, t.y); if (p) tap(p, 3, {clientX: t.x, clientY: t.y});
+    }, LONG_PRESS);
+    try { view.setPointerCapture(e.pointerId); } catch {}
+  });
+  view.addEventListener('pointermove', e => {
+    if (e.pointerType !== 'touch' || !touch || e.pointerId !== touch.id || touch.multi) return;
+    e.preventDefault();
+    const now = performance.now(), dy = e.clientY - touch.lastY;
+    if (!touch.moved && Math.hypot(e.clientX - touch.x, e.clientY - touch.y) > 8) { touch.moved = true; clearTimeout(touch.timer); }
+    if (touch.moved) { touch.v = .6 * touch.v + .4 * dy / Math.max(8, now - touch.lastT); scrollBy(-dy, touch.x, touch.y); }
+    touch.lastY = e.clientY; touch.lastT = now;
+  });
+  function endTouch(e, cancelled) {
+    if (e.pointerType !== 'touch' || !touch || e.pointerId !== touch.id) return;
+    const t = touch; touch = null; clearTimeout(t.timer);
+    if (cancelled || t.long || t.multi) return;
+    if (t.moved) { if (performance.now() - t.lastT < 80 && Math.abs(t.v) > .2) coast(t.v, t.x, t.y); return; }
+    const p = toScreen(t.x, t.y); if (!p) return;
+    const now = performance.now();
+    const double = box?.client === 'qq' && lastTap && now - lastTap.t < 350 && Math.hypot(t.x - lastTap.x, t.y - lastTap.y) < 24;
+    lastTap = double ? null : {t: now, x: t.x, y: t.y};
+    handleClick(p, {clientX: t.x, clientY: t.y}, double ? 2 : 1);
+  }
+  view.addEventListener('pointerup', e => endTouch(e, false));
+  view.addEventListener('pointercancel', e => endTouch(e, true));
+
   // ---- keyboard ----
   document.addEventListener('keydown', e => {
     if (e.target === draft || $('#sheet').classList.contains('open')) return;
@@ -315,8 +471,8 @@
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    // Typing anywhere starts a message; focus moves before the character is inserted.
-    if ((e.key.length === 1 || e.key === 'Process') && !openComposer() && box?.popups?.length === 0) message('请先在左侧选择聊天');
+    // Typing anywhere goes to the text box; focus moves before the character is inserted.
+    if ((e.key.length === 1 || e.key === 'Process') && !focusDraft() && !box?.popups?.length) message('请先在左侧选择聊天');
   });
 
   // ---- files: picker, paste and drag-and-drop ----
@@ -327,10 +483,8 @@
     const data = e.clipboardData; if (!data) return;
     const files = [...(data.files || [])];
     if (files.length) { e.preventDefault(); prepareUpload(files.map((f, i) => f.name ? f : new File([f], `粘贴图片-${Date.now()}-${i}.png`, {type: f.type}))); return; }
-    if (e.target !== draft) {
-      const text = data.getData('text/plain');
-      if (text && openComposer()) { e.preventDefault(); draft.setRangeText(text, draft.selectionStart, draft.selectionEnd, 'end'); pendingSend = null; controls(); }
-    }
+    const text = data.getData('text/plain');
+    if (text && e.target !== draft && focusDraft()) { e.preventDefault(); draft.setRangeText(text, draft.selectionStart, draft.selectionEnd, 'end'); drafts.set(draftChat, draft.value); }
   });
   addEventListener('dragenter', e => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); dragDepth++; $('#drop').classList.add('on'); } });
   addEventListener('dragover', e => { if (e.dataTransfer?.types?.includes('Files')) e.preventDefault(); });
@@ -342,7 +496,7 @@
   });
   function prepareUpload(files) {
     if (!files.length) return;
-    if (!inputArea() || !box?.conversation) return message('请先在左侧打开要发送的聊天', true);
+    if (!nativeInput() || !box?.conversation) return message('请先在左侧打开要发送的聊天', true);
     if (files.some(f => f.size > 95 * 1024 * 1024)) return message('单个文件不能超过 95MB', true);
     const sheet = $('#sheet'), list = sheet.querySelector('ul'); list.replaceChildren();
     for (const file of files) {
@@ -396,16 +550,19 @@
   $('#popup-close').onclick = () => closePopup();
   $('#to-phone').onclick = () => { try { localStorage.setItem('nas-chat-view', 'phone'); } catch {} location.href = '/mobile/?view=phone'; };
   $('#logout').onclick = async () => { try { await call('logout', {}); } catch {} location.replace('/mobile/login'); };
-  let resizeTimer = 0, shownAspect = innerHeight / Math.max(1, innerWidth);
+  const shape = () => document.documentElement.clientHeight / Math.max(1, document.documentElement.clientWidth);
+  let resizeTimer = 0, shownAspect = shape();
   addEventListener('resize', () => {
     schedulePaint();
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       // A clearly different window shape asks the server for a matching WeChat window.
-      const aspect = innerHeight / Math.max(1, innerWidth);
+      const aspect = shape();
       if (Math.abs(aspect - shownAspect) / shownAspect > .08) { shownAspect = aspect; reconnect(); }
     }, 800);
   });
+  // Closing the on-screen keyboard can leave the page panned; put it back.
+  draft.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== draft) scrollTo(0, 0); }, 50));
   document.addEventListener('visibilitychange', () => { if (document.hidden) { epoch++; socket?.close(); socket = null; } else connect(); });
   controls(); setStatus(false); schedulePaint();
   call('layout').then(r => acceptLayout(r.layout)).catch(() => {}).finally(connect);

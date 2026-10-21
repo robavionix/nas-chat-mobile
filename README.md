@@ -1,6 +1,6 @@
 # nas-chat-mobile
 
-当前版本：**0.6.0** · [更新记录](CHANGELOG.md)
+当前版本：**0.6.1** · [更新记录](CHANGELOG.md)
 
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
@@ -22,7 +22,7 @@
 - **画面传输**：默认使用 WebSocket 按横条增量推送，滚动行在手机端复用；每帧解码后确认，未确认数据较少时允许第二帧在途，公网长往返不再逐帧等待。滑动中的条带用较轻的全分辨率 JPEG，停下后自动补发清晰画面。连接中断自动降级为逐帧请求，并定时重试。
 - **清晰度**：首屏与会话切换保留原始分辨率；默认清晰优先，内网 IP 的新画面先发清晰 JPEG，稳定后补为无损 PNG。慢连接可在菜单切换为流畅优先。
 - **家里直连**：可为内网 IP 单独配置 HTTPS；设置页提供 iPhone 证书安装指引，菜单显示连接方式。从公网地址打开时，若设备信任内网证书且在家，画面推流自动改走内网（「优先家里直连」，可在菜单关闭）。
-- **电脑视图**：电脑浏览器打开同一网址自动进入，显示完整的双栏客户端（微信拉宽为双栏，QQ 改为横向窗口），支持鼠标、右键、滚轮、键盘输入与拖入文件；离开后自动恢复手机布局。
+- **电脑视图**：电脑浏览器和 iPad 打开同一网址自动进入，显示完整的双栏客户端（微信拉宽为双栏，QQ 改为横向窗口），支持鼠标、右键、滚轮与拖入文件；iPad 支持轻点、长按菜单、拖动滚动与 Magic Keyboard 触控板。输入框与原生输入框重合、本机即时输入，Enter 立即发送；离开后自动恢复手机布局。
 - **全览**：需要时可按需加载原远程桌面。
 - **独立登录**：签名 Cookie 会话（30 天）、按 IP 限制登录失败次数，支持「退出所有设备」。
 - **PWA**：可添加到主屏幕，以全屏方式打开。
@@ -187,6 +187,7 @@ node tests/test_search.cjs
 node tests/test_render.cjs
 node tests/test_scroll.cjs
 node tests/test_desktop.cjs
+node tests/test_desktop_input.cjs
 bash -n scripts/setup-lan.sh
 bash -n mobile-init/50-mobile
 bash -n mobile-services/mobile/run
@@ -241,7 +242,7 @@ bash tests/test_lan.sh
 
 ## English summary
 
-**nas-chat-mobile 0.6.0** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP frames settle to lossless PNG. A second picture may be in flight while little data is unacknowledged, and moving strips use a lighter full-resolution JPEG before being refined. Computer browsers get a desktop view of the full two-pane client, and a page opened at the public address can stream its picture over the home network when the device trusts the LAN certificate. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
+**nas-chat-mobile 0.6.1** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP frames settle to lossless PNG. A second picture may be in flight while little data is unacknowledged, and moving strips use a lighter full-resolution JPEG before being refined. Computer browsers and iPads get a desktop view of the full two-pane client with instant local typing over the native input box, and a page opened at the public address can stream its picture over the home network when the device trusts the LAN certificate. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
 
 Native Linux amd64 and arm64 deployments share one Compose configuration. The local Docker build installs isolated Python and X11 dependencies; setup, environment checks, health checks and Synology instructions are included. See [Linux deployment and validation scope](docs/linux-deployment.md).
 

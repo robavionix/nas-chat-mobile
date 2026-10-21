@@ -128,5 +128,53 @@ class DesktopTapTests(unittest.TestCase):
         self.assertEqual(clicked, [(4000, 30)])
 
 
+class NativeInputTests(unittest.TestCase):
+    def call(self, payload, leased=1):
+        calls, current = [], {'id': '9', 'popups': [], 'conversation': '3:wide-x'}
+        scope = {'desktop_lease': {'clients': leased}, 'layout': lambda: current,
+                 'validated_chat': lambda c, p: p.get('conversation') == c['conversation'] and p.get('window') == c['id'],
+                 'input_content': lambda c: 'draft typed on a phone', 'input_point': lambda c: (100, 200),
+                 'native_click': lambda *a, **k: calls.append(('click',) + a[1:]), 'set_clipboard': lambda t: calls.append(('clip', t)),
+                 'run': lambda *a: calls.append(a)}
+        exec(compile(ast.Module(body=[method('native_input')], type_ignores=[]), 'server.py', 'exec'), scope)
+        replies = []
+
+        class Handler:
+            def reply(self, status, **value):
+                replies.append((status, value.get('text', value.get('error'))))
+        scope['native_input'](Handler(), payload)
+        return replies[0], calls
+
+    def test_reads_and_fills_only_the_checked_chat(self):
+        chat = {'window': '9', 'conversation': '3:wide-x'}
+        self.assertEqual(self.call(dict(chat, action='read')), ((200, 'draft typed on a phone'), []))
+        reply, calls = self.call(dict(chat, action='write', text='你好'))
+        self.assertEqual(reply[0], 200)
+        self.assertEqual(calls, [('click', 100, 200), ('clip', '你好'), ('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')])
+        self.assertEqual(self.call(dict(chat, action='write', text=''))[1][-1], ('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'BackSpace'))
+        self.assertEqual(self.call({'window': '9', 'conversation': '2:other', 'action': 'read'})[0][0], 409)
+        self.assertEqual(self.call(dict(chat, action='send'))[0][0], 400)
+        self.assertEqual(self.call(dict(chat, action='write', text='x' * 8001))[0][0], 400)
+        self.assertEqual(self.call(dict(chat, action='read'), leased=0)[0][0], 409)
+
+
+class StartupRestoreTests(unittest.TestCase):
+    def restore(self, current, leased=0):
+        calls = []
+        scope = load(('desktop_startup_restore',), {'lock': threading.Lock(), 'desktop_lease': {'clients': leased}, 'layout': lambda: current,
+                                                    'subprocess': __import__('subprocess'),
+                                                    'resize_main': lambda c, w, h: calls.append(('resize', w, h)),
+                                                    'fit_qq': lambda c: calls.append(('fit_qq',))})
+        scope['desktop_startup_restore']()
+        return calls
+
+    def test_a_restart_gives_phones_their_window_back(self):
+        wide = {'client': 'wechat', 'chatReady': True, 'compact': False, 'screenWidth': 1800, 'screenHeight': 2800}
+        self.assertEqual(self.restore(wide), [('resize', 760, 2740)])
+        self.assertEqual(self.restore(dict(wide, compact=True)), [], 'a phone layout is left alone')
+        self.assertEqual(self.restore(wide, leased=1), [], 'a connected computer keeps its window')
+        self.assertEqual(self.restore({'client': 'qq', 'chatReady': True, 'compact': True}), [('fit_qq',)])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -622,6 +622,28 @@ def fit_desktop_popups(current, fitted):
     return moved
 
 
+def desktop_startup_restore():
+    """A restart while a computer held the window leaves it landscape; give phones their window back."""
+    with lock:
+        if desktop_lease['clients']:
+            return
+        try:
+            current = layout()
+            if not current['chatReady']:
+                return
+            if current.get('client') == 'qq':
+                fit_qq(current)
+            elif not current['compact']:
+                resize_main(current, min(current['screenWidth'], 760), max(640, current['screenHeight'] - 60))
+        except (ValueError, OSError, subprocess.SubprocessError):
+            pass
+
+
+_startup_restore = threading.Timer(30, desktop_startup_restore)
+_startup_restore.daemon = True
+_startup_restore.start()
+
+
 def desktop_leave():
     """After the last computer browser has been gone for a while, phones get their window back."""
     with lock:
@@ -716,11 +738,11 @@ def clipboard_text():
     return result.stdout.decode(errors='replace') if result.returncode == 0 else None
 
 
-def input_content(current):
+def input_content(current, activate=True):
     """Return the text in WeChat's input box, '' when empty, or None when it holds something that is not text."""
     probe = 'NAS_INPUT_CHECK_' + secrets.token_hex(12)
     set_clipboard(probe)
-    native_click(current, *input_point(current))
+    native_click(current, *input_point(current), activate=activate)
     run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+c')
     time.sleep(.12)
     value = clipboard_text()
@@ -733,6 +755,12 @@ def scroll_to_latest(current):
     run('xdotool', 'mousemove', str(x), str(y), 'click', '--repeat', '25', '--delay', '6', '5')
 
 
+def scroll_after_send(current):
+    with lock:
+        try:
+            scroll_to_latest(current)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            pass
 def validated_chat(current, payload):
     return (current['mainWindow'] and current['chatReady'] and not current['compactList'] and not current['popups']
             and current.get('editorReady',True)
@@ -1064,7 +1092,8 @@ def confirm_sent(current):
     while True:
         if not validated_chat(layout(), {'window': current['id'], 'conversation': current['conversation']}):
             return False
-        if input_content(current) == '':
+        # The window was activated when the send began; checking again needs only the click.
+        if input_content(current, False) == '':
             return True
         if time.monotonic() >= deadline:
             return False
@@ -1163,7 +1192,7 @@ class Handler(BaseHTTPRequestHandler):
         depth = 2 if query.get('pipeline', [''])[0] == '2' else 1
         desktop = query.get('layout', [''])[0] == 'desktop'
         try:
-            aspect = min(1.2, max(.4, float(query.get('aspect', ['.625'])[0])))
+            aspect = min(1.6, max(.4, float(query.get('aspect', ['.625'])[0])))
         except ValueError:
             aspect = .625
         state = {'open': True, 'acked': 0, 'sent': 0, 'heard': time.monotonic(), 'latency': .1, 'flight': {}}
@@ -1556,7 +1585,7 @@ class Handler(BaseHTTPRequestHandler):
                 session_key = secrets.token_bytes(32)
                 temporary = keyfile.with_suffix('.tmp'); temporary.write_bytes(session_key); temporary.chmod(0o600); temporary.replace(keyfile)
                 return self.reply(200, cookie=SESSION_COOKIE + '=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
-            actions = {'/send': self.send, '/tap': self.tap, '/view': self.view, '/prepare': self.prepare, '/window': self.window, '/scroll': self.scroll, '/search': self.search}
+            actions = {'/send': self.send, '/tap': self.tap, '/view': self.view, '/prepare': self.prepare, '/window': self.window, '/scroll': self.scroll, '/search': self.search, '/input': self.native_input}
             if self.path not in actions:
                 return self.reply(404, error='不存在的操作')
             with lock:
@@ -1605,7 +1634,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(409, error='聊天客户端焦点已变化，请重试')
         set_clipboard(content)
         run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')
-        if input_content(current) != content:
+        if input_content(current, False) != content:
             return self.reply(409, error='聊天客户端输入未完成，内容已保留，请再点发送')
         if not validated_chat(layout(), payload):
             return self.reply(409, error='聊天对象已变化，未发送，请重新选择会话')
@@ -1616,9 +1645,10 @@ class Handler(BaseHTTPRequestHandler):
         if not confirm_sent(current):
             return self.reply(409, error='发送尚未确认，请检查聊天画面；输入内容已保留')
         remember(request_id, 'done', fingerprint)
-        scroll_to_latest(current)
-        return self.reply(200, ok=True, confirmed=True, layout=layout())
-
+        result = layout()
+        # Scrolling to the newest message happens after the reply, so the sender is not kept waiting.
+        threading.Thread(target=scroll_after_send, args=(current,), daemon=True).start()
+        return self.reply(200, ok=True, confirmed=True, layout=result)
     def upload(self):
         try:
             length = int(self.headers.get('Content-Length', '0'))
@@ -1858,6 +1888,28 @@ class Handler(BaseHTTPRequestHandler):
         debug('desktop-tap', button=button, clicks=click_count, popup=popup['kind'] if popup else None, after=brief(result),
               seconds=round(time.monotonic() - started, 2))
         return self.reply(200, ok=True, layout=result, copied=copied)
+
+    def native_input(self, payload):
+        """The computer view's text box reads or fills the client's own box when a native button needs it."""
+        if not desktop_lease['clients']:
+            return self.reply(409, error='电脑视图尚未连接')
+        action, text = payload.get('action'), payload.get('text', '')
+        if action not in ('read', 'write') or not isinstance(text, str) or len(text) > 8000:
+            return self.reply(400, error='请求格式错误')
+        current = layout()
+        if current['popups'] or not validated_chat(current, payload):
+            return self.reply(409, error='聊天窗口已变化', layout=current)
+        if action == 'read':
+            value = input_content(current)
+            return self.reply(200, ok=True, text=value if isinstance(value, str) else '', other=value is None)
+        native_click(current, *input_point(current))
+        if text:
+            set_clipboard(text)
+            run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')
+        else:
+            run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'BackSpace')
+        return self.reply(200, ok=True)
+
 
     def scroll(self, payload):
         x, y, amount = payload.get('x'), payload.get('y'), payload.get('amount')

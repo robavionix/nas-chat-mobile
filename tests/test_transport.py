@@ -70,11 +70,13 @@ class Clock:
     def sleep(self,value):self.now+=value;self.sleeps.append(value)
 clock=Clock();ns['time']=clock;current={'id':'1','conversation':'chat:a'}
 ns['layout']=lambda:current;ns['validated_chat']=lambda *args:True
-ns['input_content']=lambda current:''
+activations=[]
+ns['input_content']=lambda current,activate=True:activations.append(activate) or ''
 assert ns['confirm_sent'](current) and not clock.sleeps
-ns['input_content']=lambda current:'pending'
+assert activations==[False],'confirmation reuses the window activated by the send'
+ns['input_content']=lambda current,activate=True:'pending'
 assert not ns['confirm_sent'](current) and 3.5<=clock.now<3.6
 ns['validated_chat']=lambda *args:False
-ns['input_content']=lambda current:(_ for _ in ()).throw(AssertionError('must not touch another chat'))
+ns['input_content']=lambda current,activate=True:(_ for _ in ()).throw(AssertionError('must not touch another chat'))
 assert not ns['confirm_sent'](current)
 print('PASS prompt send acknowledgement, bounded confirmation and changed-chat guard')

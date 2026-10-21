@@ -15,14 +15,16 @@ const mac='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 
 assert.ok(visit({ua:windows,data:{mobile:false},touch:10}).computer,'Windows touch laptops are computers');
 assert.ok(visit({ua:windows,data:{mobile:false}}).computer);
 assert.ok(visit({ua:mac}).computer,'Mac Safari');
-assert.ok(!visit({ua:mac,touch:5}).computer,'iPad reports a Mac user agent but has touch points');
+assert.ok(visit({ua:mac,touch:5,fine:false}).computer,'iPad (Mac user agent with touch points) gets the computer view');
+assert.ok(visit({ua:'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) Mobile/15E148',touch:5,fine:false}).computer,'iPad with its own user agent');
+assert.ok(!visit({ua:mac,touch:5,saved:'phone'}).computer,'an iPad that chose the phone view keeps it');
 assert.ok(!visit({ua:'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148',touch:5,fine:false}).computer);
 assert.ok(!visit({ua:'Mozilla/5.0 (Linux; Android 15) Chrome/141.0 Mobile Safari/537.36',data:{mobile:true},touch:5,fine:false}).computer);
 assert.ok(!visit({ua:'Mozilla/5.0 (Linux; Android 15) Chrome/141.0 Safari/537.36',data:{mobile:false},touch:10}).computer,'Android tablets keep the phone view');
 assert.ok(!visit({ua:windows,data:{mobile:false},saved:'phone'}).computer,'a chosen phone view is remembered');
 const chosen=visit({ua:mac,touch:5,search:'?view=desktop'});
 assert.ok(chosen.computer);assert.equal(chosen.store['nas-chat-view'],'desktop');
-console.log('PASS computer detection: Windows touch PCs, Mac, iPad, phones, Android tablets and remembered choice');
+console.log('PASS computer detection: Windows touch PCs, Mac, iPad (both user agents), phones, Android tablets and remembered choice');
 
 // ---- lan.js prefers the home network only when it is reachable ----
 const lanSource=fs.readFileSync('mobile/web/lan.js','utf8');
