@@ -3,7 +3,7 @@ from pathlib import Path
 
 source=Path('mobile/server.py').read_text(encoding='utf-8')
 tree=ast.parse(source)
-selected=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('PhonePicture','websocket_frame','websocket_read','jpeg','encode_strip','picture_quality','confirm_sent','strip_runs')]
+selected=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('PhonePicture','websocket_frame','websocket_read','jpeg','encode_strip','picture_quality','confirm_sent','strip_runs','motion_jpeg')]
 from PIL import Image
 ns={'io':io,'struct':struct,'Image':Image,'BAND':64}
 exec(compile(ast.Module(body=selected,type_ignores=[]),'tested-server','exec'),ns)
@@ -56,7 +56,13 @@ decoded=Image.open(io.BytesIO(png));assert mime=='image/png' and decoded.tobytes
 clear,mime=ns['encode_strip'](image,True,True,'clear')
 assert mime=='image/jpeg' and Image.open(io.BytesIO(clear)).width==image.width
 assert ns['picture_quality']({'quality':['invalid']})=='clear'
-print('PASS lossless pixel fidelity and full-resolution clear mode during motion')
+still,_=ns['encode_strip'](image,quality='clear')
+assert len(clear)<len(still),'motion strips are lighter than settled clear strips'
+draft,mime=ns['encode_strip'](image,quality='lossless',draft=True)
+assert mime=='image/jpeg' and Image.open(io.BytesIO(draft)).width==image.width,'a lossless draft is a full-size JPEG'
+moving,mime=ns['encode_strip'](image,True,False,'lossless')
+assert mime=='image/jpeg' and Image.open(io.BytesIO(moving)).width==image.width
+print('PASS lossless pixel fidelity, full-resolution light motion strips and lossless drafts')
 
 class Clock:
     def __init__(self):self.now=0;self.sleeps=[]

@@ -28,8 +28,18 @@ function setup(){
     live++;peak=Math.max(peak,live);decodes++;return {value:9,close(){live--}};
   };
   await c.applyMessage({key:'new',rect:[0,0,12,24],full:true,strips:[[0,8,1],[8,8,1],[16,8,1]]},new Uint8Array(3));
-  assert.equal(decodes,3);assert.equal(peak,1);assert.equal(live,0);assert.equal(c.mirror.ready,true);
+  assert.equal(decodes,3);assert.ok(peak<=3,'at most three strips decode at once');assert.equal(live,0);assert.equal(c.mirror.ready,true);
   assert.deepEqual(c.mirrorCanvas.rows,Array(24).fill(9));
+  {
+    // A tall Retina frame decodes ahead in a bounded window and still draws strictly top to bottom.
+    const tall=setup(),order=[];let alive=0,most=0,calls=0;
+    tall.mirrorCanvas.drawImage=(image,left,top)=>{order.push(top)};
+    tall.decodeImage=async()=>{calls++;alive++;most=Math.max(most,alive);await new Promise(r=>setTimeout(r,calls%2?4:1));return {value:5,close(){alive--}}};
+    const strips=Array.from({length:8},(_,i)=>[i*3,3,1]);
+    await tall.applyMessage({key:'tall',rect:[0,0,12,24],full:true,strips},new Uint8Array(8));
+    assert.equal(calls,8);assert.ok(most<=3,'no more than three bitmaps alive');assert.equal(alive,0,'every bitmap is released');
+    assert.deepEqual(order,strips.map(([top])=>top),'strips are drawn in order');
+  }
   let finishMove,shifts=0;
   c.followShift=()=>{assert.equal(c.mirror.ready,true);shifts++};
   c.decodeImage=()=>new Promise(resolve=>finishMove=resolve);

@@ -60,7 +60,7 @@ class ClientTests(unittest.TestCase):
             def __exit__(self, *args): pass
             def windows(self): return [window]
             def grab(self,x,y,width,height): return Image.new('RGB',(width,height),'white')
-        scope = {'X': Display, 'client': get_client('qq'), 'IGNORED_TYPES': set(),'qq_geometry_cache':{},'time':time,'QQ_SCALE':1}
+        scope = {'X': Display, 'client': get_client('qq'), 'IGNORED_TYPES': set(),'qq_geometry_cache':{},'time':time,'QQ_SCALE':1,'desktop_lease':{'clients':0}}
         exec(compile(ast.Module(body=functions, type_ignores=[]), 'server.py', 'exec'), scope)
         current = scope['layout']()
         self.assertEqual(current['client'], 'qq')

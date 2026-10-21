@@ -126,6 +126,13 @@ if '# mobile-session-v13' not in s or web_marker not in s:
     block=block.replace('/config/mobile/web/', web_root).replace('# mobile-session-v13', '# mobile-session-v13\n  ' + web_marker)
     s=s.replace('  location / {',block+'  location / {')
     p.write_text(s)
+# mobile-ws-token-v1: the picture stream authenticates itself (cookie or stream token), so the
+# home-network entry can serve a page opened at the public address without a second login.
+s=p.read_text()
+if '# mobile-ws-token-v1' not in s:
+    s=s.replace('  location = /mobile-api/ws {\n','  location = /mobile-api/ws {\n    # mobile-ws-token-v1\n    auth_request off;\n')
+    p.write_text(s)
+
 PY
 mkdir -p /run/wechat-mobile-service
 cp /custom-services.d/mobile/run /run/wechat-mobile-service/run

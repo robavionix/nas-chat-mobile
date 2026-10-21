@@ -15,7 +15,7 @@ const context={frameQuality:()=>'clear',mirror,WebSocket:FakeSocket,location:{pr
 vm.runInNewContext(code,context);
 function message(seq){const h=Buffer.from(JSON.stringify({seq,key:'test',strips:[]})),out=Buffer.alloc(8+h.length);out.writeUInt32BE(h.length);h.copy(out,8);return out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength)}
 (async()=>{
-  const run=context.socketMirror();assert.equal(socket.url,'wss://test.invalid/mobile-api/ws?quality=clear');
+  const run=context.socketMirror();assert.equal(socket.url,'wss://test.invalid/mobile-api/ws?quality=clear&pipeline=2');
   const consuming=socket.onmessage({data:message(1)});
   assert.equal(draws,1);assert.deepEqual(socket.sent,[],'must not ACK before decode');
   appliedResolve();await consuming;assert.deepEqual(socket.sent,['ack 1']);
@@ -23,5 +23,12 @@ function message(seq){const h=Buffer.from(JSON.stringify({seq,key:'test',strips:
   const failed=context.socketMirror();socket.onerror();await assert.rejects(failed,/不可用/);
   const stale=context.socketMirror();context.stopMirror();await socket.onmessage({data:message(2)});await stale;
   assert.equal(draws,1,'stale socket must not draw');
-  console.log('PASS WSS endpoint, ACK after draw, close lifecycle, transport error, stale generation');
+  // With a second picture in flight, pictures are drawn and acknowledged strictly in arrival order.
+  const order=[];context.applyMessage=header=>new Promise(resolve=>{order.push(header.seq);setTimeout(resolve,header.seq===3?5:0)});
+  const piped=context.socketMirror();await new Promise(r=>setTimeout(r,0));
+  const first=socket.onmessage({data:message(3)}),second=socket.onmessage({data:message(4)});
+  await first;await second;
+  assert.deepEqual(order,[3,4]);assert.deepEqual(socket.sent.filter(v=>v.startsWith('ack')),['ack 3','ack 4']);
+  context.stopMirror();socket.onclose();await piped;
+  console.log('PASS WSS endpoint, ACK after draw, close lifecycle, transport error, stale generation, ordered pipelining');
 })().catch(error=>{console.error(error);process.exitCode=1});

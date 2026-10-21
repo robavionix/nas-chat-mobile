@@ -108,12 +108,27 @@ async function applyMessage(header,bytes,valid=()=>true){
     // only newly revealed rows arrive as strips. The scrollbar column on the right is not moved.
     movePictureRows(header.moves,header.span||mirrorCanvas.width);
   }
-  for(const [top,height,size,left=0,width=mirrorCanvas.width,mime='image/jpeg'] of header.strips){
-    if(!valid())return;
-    const remaining=deadline-performance.now();
-    if(remaining<=0)throw Error('画面解码超时');
-    const image=await decodeImage(new Blob([bytes.subarray(offset,offset+=size)],{type:mime}),Math.min(3000,remaining));
-    try{if(!valid())return;mirrorContext.drawImage(image,left,top,width,height)}finally{image.close?.()}
+  // Decode up to three strips ahead and draw them in order. At most three bitmaps exist at once,
+  // which keeps large Retina frames within WebKit's memory budget while hiding decode latency.
+  const starts=header.strips.map(([,,size])=>(offset+=size)-size),pending=[];let next=0;
+  const ahead=()=>{
+    while(next<header.strips.length&&pending.length<3){
+      const [,,size,,,mime='image/jpeg']=header.strips[next];
+      const picture=decodeImage(new Blob([bytes.subarray(starts[next],starts[next]+size)],{type:mime}),Math.min(3000,Math.max(1,deadline-performance.now())));
+      picture.catch(()=>{});pending.push(picture);next++;
+    }
+  };
+  try{
+    for(const [top,height,,left=0,width=mirrorCanvas.width] of header.strips){
+      if(!valid())return;
+      if(performance.now()>deadline)throw Error('画面解码超时');
+      ahead();
+      const image=await pending.shift();
+      try{if(!valid())return;mirrorContext.drawImage(image,left,top,width,height)}finally{image.close?.()}
+    }
+  }finally{
+    // Release pictures that finished decoding after an early return or a failed strip.
+    for(const picture of pending)picture.then(image=>image.close?.(),()=>{});
   }
   if(!valid())return;
   if(header.strips.length||header.moves?.length){mirror.changed=performance.now();mirror.version++;renderDirty=true}
@@ -150,7 +165,7 @@ async function applyFrame(buffer,valid=()=>true){
 function transportStatus(){
   const label=document.querySelector('#connection-info');
   if(label){
-    label.textContent=(/^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname)?'家里直连':'公网连接')+' · '+(mirror.mode==='websocket'?'实时推送':'兼容模式');
+    label.textContent=(mirror.lan||/^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname)?'家里直连':'公网连接')+' · '+(mirror.mode==='websocket'?'实时推送':'兼容模式');
     label.dataset.transport=mirror.mode;
   }
 }
@@ -168,14 +183,22 @@ document.addEventListener('DOMContentLoaded',()=>{
   };
 });
 async function socketMirror(){
-  const epoch=mirror.epoch,socket=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/mobile-api/ws?quality='+frameQuality());
+  // At home the picture may come straight from the NAS; the page itself stays on this address.
+  // The generation is read first: a mirror stopped while lan.js answers must not open a socket.
+  const epoch=mirror.epoch,lan=globalThis.nasLan?await globalThis.nasLan.stream():null;
+  if(epoch!==mirror.epoch)return;
+  const quality=frameQuality()==='adaptive'||!lan?frameQuality():'lossless';
+  mirror.lan=!!lan;
+  const socket=new WebSocket((lan?lan.base:(location.protocol==='https:'?'wss:':'ws:')+'//'+location.host)+'/mobile-api/ws?quality='+quality+'&pipeline=2'+(lan?'&token='+encodeURIComponent(lan.token):''));
   socket.binaryType='arraybuffer';mirror.socket=socket;mirror.target='websocket';
-  let received=false,last=performance.now(),busy=false,settled=false;
+  let received=false,last=performance.now(),settled=false,queue=Promise.resolve(),queued=0;
   const valid=()=>!settled&&epoch===mirror.epoch&&!document.hidden&&view!=='full';
   return new Promise((resolve,reject)=>{
     function finish(error){
       if(settled)return;settled=true;clearInterval(watchdog);
       if(mirror.socket===socket)mirror.socket=null;
+      // A failed home-network stream falls back to the public address straight away.
+      if(lan&&error){globalThis.nasLan.failed();mirror.lan=false;error=null}
       socket.close();error?reject(error):resolve();
     }
     const watchdog=setInterval(()=>{
@@ -183,12 +206,18 @@ async function socketMirror(){
       if(performance.now()-last>(received?15000:5000))return finish(Error('画面连接超时'));
       if(socket.readyState===1)socket.send('ping');
     },3000);
-    socket.onmessage=async event=>{
+    socket.onmessage=event=>{
       if(!valid())return finish();
-      if(busy)return finish(Error('画面队列不同步'));
-      busy=true;
+      // The server may send one picture ahead; pictures are applied strictly in arrival order.
+      if(++queued>3)return finish(Error('画面队列不同步'));
+      const buffer=event.data;
+      // An idle queue starts at once; otherwise the picture waits for the one before it.
+      queue=(queued===1?showFrame(buffer):queue.then(()=>showFrame(buffer))).finally(()=>queued--);
+      return queue;
+    };
+    async function showFrame(buffer){
+      if(settled)return;
       try{
-        const buffer=event.data;
         if(!(buffer instanceof ArrayBuffer)||buffer.byteLength<8)throw Error('画面格式无效');
         const lengths=new DataView(buffer),hl=lengths.getUint32(0),bl=lengths.getUint32(4);
         if(hl>65536||bl>12*1024*1024||8+hl+bl!==buffer.byteLength)throw Error('画面长度无效');
@@ -203,12 +232,14 @@ async function socketMirror(){
         controls();
         await new Promise(requestAnimationFrame);
         if(valid()&&socket.readyState===1)socket.send('ack '+header.seq);
-      }catch(error){finish(error)}finally{busy=false}
-    };
+      }catch(error){finish(error)}
+    }
     socket.onerror=()=>finish(Error('实时连接不可用'));
     socket.onclose=()=>finish(valid()?Error('实时连接已断开'):null);
   });
 }
+// When the home network becomes reachable, or the preference changes, move the stream without a visible reset.
+globalThis.addEventListener?.('nas-lan-change',()=>{if(mirror.mode==='websocket'&&mirror.socket&&!document.hidden&&view!=='full'){mirror.epoch++;mirror.socket.close()}});
 function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close();releaseScrollCache()}
 
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMirror()});

@@ -280,6 +280,20 @@ def inspect_main(x, box, covered):
     return is_list, str(navigation['revision']) + ':' + identity
 
 
+def inspect_wide(x, box, covered):
+    """Two-pane WeChat: tell chats apart by the left part of the chat header, away from hover buttons."""
+    if covered and navigation['identity']:
+        identity = navigation['identity']
+    else:
+        left = box['x'] + box['split'] + 12
+        title = x.grab(left, box['y'] + 48, max(40, min(600, (box['width'] - box['split']) // 2)), 90).convert('L')
+        identity = 'wide-' + title_identity(title.resize((max(8, title.width // 6), 8), Image.BOX).tobytes())
+    if identity != navigation['identity']:
+        navigation.update(identity=identity, revision=navigation['revision'] + 1)
+    navigation['list'] = False
+    return str(navigation['revision']) + ':' + identity
+
+
 split_cache = {}
 
 
@@ -467,6 +481,7 @@ def layout():
         box = {key: selected[key] for key in ('x', 'y', 'width', 'height', 'id')}
         box.update(mainWindow=True, screenWidth=x.width, screenHeight=x.height, popups=popups, windows=behind)
         box.update(client=client.key, clientLabel=client.label)
+        box['desktop'] = desktop_lease['clients'] > 0
         box['chatReady'] = client.phone_layout and box['width'] > 500 and box['height'] > 600
         box['setupRequired'] = not client.phone_layout and box['width'] > 600
         box['compact'] = box['chatReady'] and box['width'] < 1000
@@ -487,15 +502,149 @@ def layout():
                 # narrower native chat instead of clipping enlarged bubbles.
                 # The tall desktop retains history for local composited drags.
                 box['preferredWidth'] = 1100*QQ_SCALE+profile['sidebarWidth'] if profile['editorReady'] else box['width']
+                if desktop_lease['clients']:
+                    # A computer shows both columns at once; the phone's list/chat choice does not apply.
+                    box['compactList'] = False
+                    box['conversation'] = str(navigation['revision'])+':'+(navigation['identity'] or 'none')
+                chat = profile['chat']
+                box['headerRect'] = [chat['x'], chat['y'], min(chat['width'], 450*QQ_SCALE), chat['header']]
+                if profile['editorReady']:
+                    # The editor below the toolbar row; a computer browser lays its own text box over it.
+                    top = chat['y']+chat['height']+44*QQ_SCALE
+                    box['editorRect'] = [chat['x'], top, chat['width'], box['y']+box['height']-top]
         elif box['compact']:
             box['compactList'], box['conversation'] = inspect_main(x, box, bool(popups))
             box['split'] = 104
-        elif box['chatReady'] and not popups:
-            try:
-                box['split'] = detect_split(x, box)
-            except Exception:
-                pass
+        elif box['chatReady']:
+            if not popups:
+                try:
+                    box['split'] = detect_split(x, box)
+                except Exception:
+                    pass
+            else:
+                cached = split_cache.get((box['id'], box['width'], box['height']))
+                box['split'] = cached[1] if cached else None
+            if box['split']:
+                box['conversation'] = inspect_wide(x, box, bool(popups))
+                left = box['x'] + box['split'] + 2
+                box['headerRect'] = [left, box['y'] + 48, min(900, box['width'] - box['split'] - 2), 90]
+                # WeChat's text box below its 56-pixel toolbar row.
+                box['editorRect'] = [left, box['y'] + box['height'] - 202, box['width'] - box['split'] - 2, 202]
         return box
+
+
+# ---- Computer browsers: the client temporarily takes a landscape window ----
+DESKTOP_GRACE = 20
+# At QQ's triple scale the computer picture is halved, close to an ordinary desktop's size.
+DESKTOP_REDUCE = 2 if QQ_SCALE >= 3 else 1
+desktop_lease = {'clients': 0, 'generation': 0, 'restore': None}
+
+
+def resize_main(current, width, height):
+    with X() as display:
+        display.unmaximize(current['id'])
+    time.sleep(.06)
+    run('xdotool', 'windowsize', current['id'], str(width), str(height))
+    run('xdotool', 'windowmove', current['id'], '0', '0')
+    run('xdotool', 'windowactivate', '--sync', current['id'])
+    time.sleep(.2)
+    qq_geometry_cache.clear()
+    split_cache.clear()
+
+
+def desktop_geometry(current, aspect):
+    """WeChat widens into its two-pane layout; QQ, already two-pane, turns landscape at its own scale."""
+    if current.get('client') == 'qq':
+        width, least = min(current['screenWidth'], 1350 * QQ_SCALE), 700 * QQ_SCALE
+    else:
+        width, least = min(current['screenWidth'], 1800), 800
+    return width, max(least, min(current['screenHeight'] - 60, round(width * aspect)))
+
+
+def desktop_enter(aspect):
+    """Hold `lock`. A computer browser gets a landscape window matching its own shape."""
+    desktop_lease['clients'] += 1
+    desktop_lease['generation'] += 1
+    current = layout()
+    if not current['chatReady']:
+        return
+    width, height = desktop_geometry(current, aspect)
+    if desktop_lease['restore'] is None:
+        desktop_lease['restore'] = (current['width'], current['height'])
+    if (current['width'], current['height'], current['x'], current['y']) != (width, height, 0, 0):
+        resize_main(current, width, height)
+
+
+def clear_window_state(display, wid):
+    """Leave maximised and full-screen states, which would ignore a new size."""
+    for first, second in (('_NET_WM_STATE_MAXIMIZED_VERT', '_NET_WM_STATE_MAXIMIZED_HORZ'), ('_NET_WM_STATE_FULLSCREEN', None)):
+        event = _ClientMessage(type=33, send_event=1, display=display.d, window=int(wid),
+                               message_type=display.atom('_NET_WM_STATE'), format=32)
+        event.data[0] = 0
+        event.data[1] = display.atom(first)
+        event.data[2] = display.atom(second) if second else 0
+        event.data[3] = 1
+        _x.XSendEvent(display.d, display.root, 0, (1 << 20) | (1 << 19), ctypes.byref(event))
+    _x.XFlush(display.d)
+
+
+def fit_desktop_popups(current, fitted):
+    """Viewers and dialogs that spill past the main window are laid over it, so a computer keeps one picture shape.
+
+    Larger ones take the main window's size; smaller ones are only centred over it. Menus are left alone.
+    """
+    left, top = current['x'], current['y']
+    right, bottom = left + current['width'], top + current['height']
+    moved = False
+    for popup in current['popups']:
+        if popup['kind'] == 'menu' or popup['id'] in fitted:
+            continue
+        if left <= popup['x'] and top <= popup['y'] and popup['x'] + popup['width'] <= right and popup['y'] + popup['height'] <= bottom:
+            continue
+        fitted.add(popup['id'])
+        if not lock.acquire(timeout=.5):
+            fitted.discard(popup['id'])
+            continue
+        try:
+            width, height = min(popup['width'], current['width']), min(popup['height'], current['height'])
+            if (width, height) != (popup['width'], popup['height']):
+                with X() as display:
+                    clear_window_state(display, popup['id'])
+                time.sleep(.06)
+                run('xdotool', 'windowsize', popup['id'], str(width), str(height))
+            run('xdotool', 'windowmove', popup['id'], str(left + (current['width'] - width) // 2), str(top + (current['height'] - height) // 2))
+            time.sleep(.15)
+            moved = True
+        except (ValueError, OSError, subprocess.SubprocessError):
+            pass
+        finally:
+            lock.release()
+    return moved
+
+
+def desktop_leave():
+    """After the last computer browser has been gone for a while, phones get their window back."""
+    with lock:
+        desktop_lease['clients'] = max(0, desktop_lease['clients'] - 1)
+        generation = desktop_lease['generation']
+
+    def restore():
+        with lock:
+            if desktop_lease['clients'] or desktop_lease['generation'] != generation:
+                return
+            saved, desktop_lease['restore'] = desktop_lease['restore'], None
+            try:
+                current = layout()
+                if saved and current['chatReady'] and (current['width'], current['height'], current['x'], current['y']) != (*saved, 0, 0):
+                    resize_main(current, *saved)
+                    current = layout()
+                if current.get('client') == 'qq' and current['chatReady']:
+                    fit_qq(current)
+            except (ValueError, OSError, subprocess.SubprocessError):
+                pass
+    timer = threading.Timer(DESKTOP_GRACE, restore)
+    timer.daemon = True
+    timer.start()
 
 
 def wait_layout(done, timeout, step=.12, fresh=False):
@@ -512,6 +661,9 @@ def wait_layout(done, timeout, step=.12, fresh=False):
 
 def fit_qq(current):
     """Fit before replying to navigation, so the phone never sees a late reflow."""
+    if desktop_lease['clients']:
+        # A computer browser holds the landscape window; phones use it as it is.
+        return current
     width = min(current['screenWidth'], current['preferredWidth'])
     height = max(640, current['screenHeight']-60)
     if (current['width'],current['height'],current['x'],current['y']) != (width,height,0,0):
@@ -624,6 +776,25 @@ def authenticated(headers):
         return False
 
 
+STREAM_TOKEN_SECONDS = 120
+
+
+def stream_token():
+    """A short-lived bearer for the picture stream only, so the home-network entry needs no second login."""
+    body = 'stream.' + str(int(time.time()) + STREAM_TOKEN_SECONDS) + '.' + secrets.token_hex(8)
+    return body + '.' + hmac.new(session_key, body.encode(), hashlib.sha256).hexdigest()
+
+
+def stream_token_valid(token, fresh=True):
+    # Signed with the session key, so signing out everywhere also ends streams opened with a token.
+    try:
+        kind, expiry, nonce, signature = token.split('.')
+        expected = hmac.new(session_key, '.'.join((kind, expiry, nonce)).encode(), hashlib.sha256).hexdigest()
+        return kind == 'stream' and hmac.compare_digest(expected, signature) and (not fresh or int(expiry) > time.time())
+    except (ValueError, AttributeError):
+        return False
+
+
 def push_owner(headers):
     cookie = SimpleCookie()
     cookie.load(headers.get('Cookie', ''))
@@ -692,6 +863,12 @@ mirror_lock = threading.Lock()
 
 
 def target_rect(current, target):
+    if target == 'desktop':
+        boxes = [current] + current['popups']
+        left, top = max(0, min(b['x'] for b in boxes)), max(0, min(b['y'] for b in boxes))
+        right = min(current['screenWidth'], max(b['x'] + b['width'] for b in boxes))
+        bottom = min(current['screenHeight'], max(b['y'] + b['height'] for b in boxes))
+        return [left, top, right - left, bottom - top], 'desktop:' + current['id']
     if target == 'popup':
         if not current['popups']:
             return None
@@ -739,11 +916,22 @@ def jpeg(image, motion=False, slow=False):
     return output.getvalue()
 
 
-def encode_strip(image, motion=False, slow=False, quality='clear'):
-    if quality == 'lossless' and not motion:
+def motion_jpeg(image, slow=False):
+    # Full resolution at a lighter setting while content moves (about a third smaller and
+    # several times faster to encode); sharp strips replace it once the content settles.
+    output = io.BytesIO()
+    image.save(output, 'JPEG', quality=75 if slow else 85, subsampling=2)
+    return output.getvalue()
+
+
+def encode_strip(image, motion=False, slow=False, quality='clear', draft=False):
+    # A draft is the first look at a new lossless screen: a sharp JPEG now, PNG once it settles.
+    if quality == 'lossless' and not motion and not draft:
         output = io.BytesIO()
         image.save(output, 'PNG', compress_level=2)
         return output.getvalue(), 'image/png'
+    if motion and quality in ('clear', 'lossless'):
+        return motion_jpeg(image, slow), 'image/jpeg'
     return jpeg(image, motion if quality == 'adaptive' else False, slow), 'image/jpeg'
 
 
@@ -796,6 +984,8 @@ class PhonePicture:
 
 
 WEBSOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+# A second picture is sent before the first is acknowledged only while less than this is unacknowledged.
+PIPELINE_BYTES = 192 * 1024
 
 
 def websocket_frame(payload, opcode=2):
@@ -951,10 +1141,14 @@ class Handler(BaseHTTPRequestHandler):
             valid_key = len(base64.b64decode(key, validate=True)) == 16
         except ValueError:
             valid_key = False
-        if not authenticated(self.headers):
+        query = parse_qs(urlsplit(self.path).query)
+        # The home-network entry is opened from the public page with a stream token instead of a cookie.
+        token = query.get('token', [''])[0][:200]
+        by_token = bool(token) and stream_token_valid(token)
+        if not by_token and not authenticated(self.headers):
             return self.reply(401, error='请重新登录')
         if (self.headers.get('Upgrade', '').lower() != 'websocket' or not valid_key
-                or origin != self.headers.get('Host') or self.headers.get('Sec-WebSocket-Version') != '13'):
+                or (not by_token and origin != self.headers.get('Host')) or self.headers.get('Sec-WebSocket-Version') != '13'):
             return self.reply(400, error='请从手机界面连接')
         self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.connection.settimeout(35)
@@ -964,7 +1158,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Sec-WebSocket-Accept', base64.b64encode(hashlib.sha1((key + WEBSOCKET_GUID).encode()).digest()).decode())
         self.end_headers()
         self.close_connection = True
-        state = {'open': True, 'acked': 0, 'sent': 0, 'heard': time.monotonic(), 'sent_at': 0, 'latency': .1}
+        # Phones that apply pictures strictly in order ask for a second picture in flight, so a
+        # long network round trip no longer stalls every update. Older pages keep one at a time.
+        depth = 2 if query.get('pipeline', [''])[0] == '2' else 1
+        desktop = query.get('layout', [''])[0] == 'desktop'
+        try:
+            aspect = min(1.2, max(.4, float(query.get('aspect', ['.625'])[0])))
+        except ValueError:
+            aspect = .625
+        state = {'open': True, 'acked': 0, 'sent': 0, 'heard': time.monotonic(), 'latency': .1, 'flight': {}}
+        flight_lock = threading.Lock()
         write_lock = threading.Lock()
 
         def write(payload, opcode=2):
@@ -981,10 +1184,13 @@ class Handler(BaseHTTPRequestHandler):
                     state['heard'] = time.monotonic()
                     if frame[0] == 1 and re.fullmatch(rb'ack [0-9]{1,12}', frame[1]):
                         ack = int(frame[1][4:])
-                        if state['acked'] < ack == state['sent']:
-                            elapsed = time.monotonic() - state['sent_at']
-                            state['latency'] = .75 * state['latency'] + .25 * elapsed
-                            state['acked'] = ack
+                        with flight_lock:
+                            if state['acked'] < ack <= state['sent']:
+                                sent_at = state['flight'].get(ack, (time.monotonic(), 0))[0]
+                                state['latency'] = .75 * state['latency'] + .25 * (time.monotonic() - sent_at)
+                                for seq in [seq for seq in state['flight'] if seq <= ack]:
+                                    del state['flight'][seq]
+                                state['acked'] = ack
                     elif frame[0] == 9:
                         write(frame[1], 10)
             except OSError:
@@ -995,26 +1201,151 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(target=listen, daemon=True).start()
 
         def send(message):
-            state['sent'] += 1
-            state['sent_at'] = time.monotonic()
+            with flight_lock:
+                state['sent'] += 1
+                state['flight'][state['sent']] = (time.monotonic(), len(message))
             write(message)
 
         def ready():
-            if not state['open'] or time.monotonic() - state['heard'] > 25 or not authenticated(self.headers):
+            if (not state['open'] or time.monotonic() - state['heard'] > 25
+                    or not (stream_token_valid(token, False) if by_token else authenticated(self.headers))):
                 raise BrokenPipeError
-            # At most one picture in flight. Intermediate desktop states are never queued.
-            return state['sent'] == state['acked']
+            # One picture in flight, or a second while the first is small enough to be waiting on
+            # the round trip rather than on bandwidth. Intermediate desktop states are never queued deeper.
+            with flight_lock:
+                waiting = state['sent'] - state['acked']
+                queued = sum(size for _, size in state['flight'].values())
+            return waiting == 0 or (waiting < depth and queued <= PIPELINE_BYTES)
 
         try:
-            self.push_frames(send, ready, lambda: state['sent'] + 1, lambda: state['latency'], picture_quality(parse_qs(urlsplit(self.path).query)))
+            if desktop:
+                with lock:
+                    try:
+                        desktop_enter(aspect)
+                    except (ValueError, OSError, subprocess.SubprocessError):
+                        pass
+            self.push_frames(send, ready, lambda: state['sent'] + 1, lambda: state['latency'], picture_quality(query), desktop)
         finally:
             state['open'] = False
+            if desktop:
+                desktop_leave()
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
 
-    def push_frames(self, send, ready, sequence, latency=lambda: .1, quality='clear'):
+    def capture_desktop(self, send, ready, sequence, latency, profile):
+        """The whole landscape window for computer browsers, reduced at QQ's triple scale.
+
+        Columns are compared on their own: the list, the chat (whose scrolled rows are moved on the
+        computer instead of being sent again) and the rest (scrollbar and any group sidebar).
+        """
+        reduce = DESKTOP_REDUCE
+        key, columns, bands, fitted = None, None, None, set()
+        current, checked, shown_layout = None, 0, None
+        last_change, last_send, previous_changed = 0, 0, False
+        while True:
+            now = time.monotonic()
+            try:
+                if not ready():
+                    time.sleep(.02)
+                    continue
+                if now - checked > .3 or current is None:
+                    current, checked = layout(), now
+                if current['popups'] and fit_desktop_popups(current, fitted):
+                    current, checked = layout(), now
+                snapshot = json.dumps(current, sort_keys=True)
+                header, blobs = {}, []
+                if snapshot != shown_layout:
+                    header['layout'] = current
+                rect, name = target_rect(current, 'desktop')
+                with X() as x:
+                    data, width, height, stride = x.raw(*rect)
+                if reduce > 1:
+                    picture = Image.frombuffer('RGB', (width, height), data, 'raw', 'BGRX', stride, 1).reduce(reduce)
+                    data, width, height = picture.tobytes(), picture.width, picture.height
+                    stride, depth = width * 3, 3
+                else:
+                    picture, depth = None, 4
+                cut = right = 0
+                if not current['popups'] and current.get('panes'):
+                    chat = current['panes']['chat']
+                    cut = (chat['x'] - rect[0]) // reduce
+                    right = (chat['x'] + chat['width'] - rect[0]) // reduce - EDGE
+                elif not current['popups'] and current['split'] and not current['compact']:
+                    cut, right = (current['x'] - rect[0] + current['split'] + 2) // reduce, width - EDGE
+                if not 64 < cut < right - 64 < width:
+                    cut, right = 0, width - EDGE
+                new_key = name + ':' + ','.join(map(str, rect)) + ':%d:%d' % (cut, right)
+                full = new_key != key
+                if full:
+                    key = new_key
+                    columns = ([(0, cut)] if cut else []) + [(cut, right), (right, width)]
+                    bands = [PhonePicture(height) for _ in columns]
+                chat_band = len(columns) - 2
+                pixels = memoryview(data)
+                rows = [[zlib.crc32(pixels[i * stride + a * depth:i * stride + b * depth]) for i in range(height)] for a, b in columns]
+                moves, changed = [], []
+                for index, band in enumerate(bands):
+                    lines = [i for i in range(height) if rows[index][i] != band.rows[i]]
+                    if index == chat_band and len(lines) >= 16 and not full:
+                        moves = band.find_moves(rows[index])
+                        if moves:
+                            band.move(moves)
+                            lines = [i for i in range(height) if rows[index][i] != band.rows[i]]
+                    changed.append(sorted({i // BAND for i in lines}))
+                count = (height + BAND - 1) // BAND
+                moving = not full and (any(changed) or bool(moves))
+                motion = moving and (previous_changed or bool(moves) or sum(map(len, changed)) * 3 > count * len(columns))
+                if moving:
+                    last_change = now
+                previous_changed = moving
+                draft = full and profile == 'lossless'
+                refine = [[s for s in range(count) if s not in set(changed[index]) and any(band.low[s * BAND:(s + 1) * BAND])
+                           and now - max(band.stamp[s * BAND:(s + 1) * BAND]) > max(.3, min(1.2, latency()))]
+                          for index, band in enumerate(bands)]
+                for index, band in enumerate(bands):
+                    for s in changed[index]:
+                        for i in range(s * BAND, min(height, (s + 1) * BAND)):
+                            band.rows[i], band.low[i], band.stamp[i] = rows[index][i], motion or draft, now
+                    for s in refine[index]:
+                        for i in range(s * BAND, min(height, (s + 1) * BAND)):
+                            band.low[i] = False
+                if any(changed) or any(refine) or moves or header or now - last_send > 5:
+                    image = picture or Image.frombuffer('RGB', (width, height), data, 'raw', 'BGRX', stride, 1)
+                    strips = []
+                    if full:
+                        # A new picture is sent across its full width, without seams between columns.
+                        for top, size in strip_runs(range(count), height, 512):
+                            blob, mime = encode_strip(image.crop((0, top, width, top + size)), False, False, profile, draft)
+                            strips.append([top, size, len(blob), 0, width, mime])
+                            blobs.append(blob)
+                    else:
+                        for index, (a, b) in enumerate(columns):
+                            for group, quality in ((changed[index], motion), (refine[index], False)):
+                                for top, size in strip_runs(group, height):
+                                    blob, mime = encode_strip(image.crop((a, top, b, top + size)), quality, latency() > .4, profile)
+                                    strips.append([top, size, len(blob), a, b - a, mime])
+                                    blobs.append(blob)
+                    a, b = columns[chat_band]
+                    header.update(key=key, rect=rect, size=[width, height], scale=reduce, full=full, strips=strips,
+                                  moves=moves, moveLeft=a, moveWidth=b - a)
+                if header:
+                    header['seq'] = sequence()
+                    head = json.dumps(header, ensure_ascii=False).encode()
+                    send(struct.pack('>II', len(head), sum(map(len, blobs))) + head + b''.join(blobs))
+                    last_send, shown_layout = now, snapshot
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+            except Exception:
+                time.sleep(.5)
+                current, key, columns, bands, shown_layout = None, None, None, None, None
+                continue
+            time.sleep(max(.04, min(.15, latency() * .2)) if now - last_change < 1.5 else .25)
+
+    def push_frames(self, send, ready, sequence, latency=lambda: .1, quality='clear', desktop=False):
+        if desktop:
+            return self.capture_desktop(send, ready, sequence, latency, quality)
         picture_profile = quality
         key, phone = None, None
         current, checked, shown_layout, shown_conversation = None, 0, None, None
@@ -1077,9 +1408,11 @@ class Handler(BaseHTTPRequestHandler):
                     if moving or edge_strips:
                         last_change = now
                     previous_changed = moving
+                    # Motion strips and lossless drafts are lighter encodings; refine them once they settle.
+                    draft = full and picture_profile == 'lossless'
                     for s in changed_strips:
                         for i in range(s * BAND, min(height, (s + 1) * BAND)):
-                            phone.rows[i], phone.low[i], phone.stamp[i] = rows[i], motion, now
+                            phone.rows[i], phone.low[i], phone.stamp[i] = rows[i], motion or draft, now
                     for s in refine:
                         for i in range(s * BAND, min(height, (s + 1) * BAND)):
                             phone.low[i] = False
@@ -1092,9 +1425,9 @@ class Handler(BaseHTTPRequestHandler):
                         image = Image.frombuffer('RGB', (width, height), data, 'raw', 'BGRX', stride, 1)
                         strips, span = [], width if full else main
                         max_rows = 256 if current.get('client') == 'qq' and QQ_SCALE > 1 else 0
-                        for group, quality in ((changed_strips, motion), (refine, False)):
+                        for group, quality, first in ((changed_strips, motion, draft), (refine, False, False)):
                             for top, size in strip_runs(group, height, max_rows):
-                                blob, mime = encode_strip(image.crop((0, top, span, top + size)), quality, latency() > .4, picture_profile)
+                                blob, mime = encode_strip(image.crop((0, top, span, top + size)), quality, latency() > .4, picture_profile, first)
                                 strips.append([top, size, len(blob), 0, span, mime])
                                 blobs.append(blob)
                         for top, size in strip_runs(edge_strips, height):
@@ -1206,6 +1539,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(404, error='不存在的推送操作')
                 except ValueError as error:
                     return self.reply(400, error=str(error))
+            if self.path == '/stream-token':
+                if not authenticated(self.headers):
+                    return self.reply(401, error='请重新登录')
+                return self.reply(200, ok=True, token=stream_token())
             if self.path == '/debug':
                 debug('phone', agent=self.headers.get('User-Agent', '')[:160], data=payload)
                 return self.reply(200, ok=True)
@@ -1372,6 +1709,8 @@ class Handler(BaseHTTPRequestHandler):
         if not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y)) or button not in (1, 3):
             return self.reply(400, error='触摸位置无效')
         started, current = time.monotonic(), layout()
+        if payload.get('target') == 'desktop':
+            return self.desktop_tap(current, x, y, button, payload.get('clickCount', 1), started)
         debug('tap', target=payload.get('target'), x=x, y=y, button=button, sent=payload.get('conversation'), before=brief(current),
               signature=isinstance(payload.get('signature'), list))
         if payload.get('target') == 'popup':
@@ -1486,6 +1825,40 @@ class Handler(BaseHTTPRequestHandler):
             threading.Timer(1.5, lambda: debug('tap-later', after=brief(layout()))).start()
         return self.reply(200, ok=True, layout=result, navigation=result['conversation'] != current['conversation'])
 
+    def desktop_tap(self, current, x, y, button, click_count, started):
+        if type(click_count) is not int or click_count not in (1, 2):
+            return self.reply(400, error='触摸位置无效')
+        if not desktop_lease['clients']:
+            return self.reply(409, error='电脑视图尚未连接', layout=current)
+        inside = lambda w: w['x'] <= x < w['x'] + w['width'] and w['y'] <= y < w['y'] + w['height']
+        popup = next((p for p in current['popups'] if inside(p)), None)
+        if not popup:
+            if not inside(current):
+                return self.reply(400, error='请点选' + client.label + '窗口里的内容')
+            # The title bar's own buttons would minimise, maximise or close the client on the NAS.
+            band, buttons = (40 * QQ_SCALE, 200 * QQ_SCALE) if current.get('client') == 'qq' else (60, 300)
+            if y < current['y'] + band and x >= current['x'] + current['width'] - buttons:
+                return self.reply(400, error='窗口按钮在电脑视图里不可用')
+        before = clipboard_text() if popup and popup['kind'] == 'menu' else None
+        if popup and popup['kind'] != 'menu':
+            run('xdotool', 'windowactivate', popup['id'])
+        native_click(current, x, y, button, activate=not popup, guard=click_count == 1)
+        if click_count == 2:
+            time.sleep(.08)
+            native_click(current, x, y, button, activate=False, guard=False)
+        ids = [p['id'] for p in current['popups']]
+        result = wait_layout(lambda now: [p['id'] for p in now['popups']] != ids or now['conversation'] != current['conversation'],
+                             .9 if button == 3 or popup else .45, .08, fresh=True)
+        copied = None
+        if popup and popup['kind'] == 'menu' and button == 1:
+            time.sleep(.15)
+            after = clipboard_text()
+            if after and after != before and not after.startswith('NAS_INPUT_CHECK_') and len(after) <= 20000:
+                copied = after
+        debug('desktop-tap', button=button, clicks=click_count, popup=popup['kind'] if popup else None, after=brief(result),
+              seconds=round(time.monotonic() - started, 2))
+        return self.reply(200, ok=True, layout=result, copied=copied)
+
     def scroll(self, payload):
         x, y, amount = payload.get('x'), payload.get('y'), payload.get('amount')
         if not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y, amount)) or not 0 < abs(amount) <= 30:
@@ -1523,8 +1896,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def prepare(self, payload):
         current = layout()
-        # Old, disconnected pages must not keep resizing the shared desktop.
-        if payload.get('stable') is not True or current['popups']:
+        # Old, disconnected pages must not keep resizing the shared desktop, nor phones while a computer uses it.
+        if payload.get('stable') is not True or current['popups'] or desktop_lease['clients']:
             return self.reply(200, ok=True, layout=current)
         if current.get('client') == 'qq' and (current['x'] < 0 or current['y'] < 0
                 or current['x']+current['width'] > current['screenWidth'] or current['y']+current['height'] > current['screenHeight']):
