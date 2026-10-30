@@ -93,6 +93,31 @@ _x.XFree.argtypes = [_vp]
 _x.XSetErrorHandler.argtypes = [_vp]
 _ignore_errors = ctypes.CFUNCTYPE(_int, _vp, _vp)(lambda display, event: 0)  # windows can vanish between calls
 _x.XSetErrorHandler(ctypes.cast(_ignore_errors, _vp))
+
+# MIT-SHM lets Xvfb write pixels straight into shared memory instead of
+# streaming them over the X socket; X.raw() falls back to XGetImage without it.
+try:
+    _xext = ctypes.CDLL('libXext.so.6')
+    _libc = ctypes.CDLL(None, use_errno=True)
+
+    class _ShmSegment(ctypes.Structure):
+        _fields_ = [('shmseg', _ul), ('shmid', _int), ('shmaddr', _vp), ('readOnly', _int)]
+
+    _xext.XShmQueryExtension.argtypes = [_vp]
+    _xext.XShmCreateImage.argtypes = [_vp, _vp, ctypes.c_uint, _int, ctypes.c_char_p, ctypes.POINTER(_ShmSegment),
+                                      ctypes.c_uint, ctypes.c_uint]
+    _xext.XShmCreateImage.restype = ctypes.POINTER(_XImage)
+    _xext.XShmAttach.argtypes = _xext.XShmDetach.argtypes = [_vp, ctypes.POINTER(_ShmSegment)]
+    _xext.XShmGetImage.argtypes = [_vp, _ul, ctypes.POINTER(_XImage), _int, _int, _ul]
+    _x.XDefaultVisual.argtypes = [_vp, _int]; _x.XDefaultVisual.restype = _vp
+    _x.XDefaultDepth.argtypes = [_vp, _int]
+    _x.XSync.argtypes = [_vp, _int]
+    _libc.shmget.argtypes = [_int, ctypes.c_size_t, _int]
+    _libc.shmat.argtypes = [_int, _vp, _int]; _libc.shmat.restype = _vp
+    _libc.shmdt.argtypes = [_vp]
+    _libc.shmctl.argtypes = [_int, _int, _vp]
+except (OSError, AttributeError):
+    _xext = None
 x_lock = threading.Lock()
 IGNORED_TYPES = {'DESKTOP', 'DOCK', 'TOOLTIP', 'NOTIFICATION', 'DND'}
 
@@ -201,6 +226,9 @@ class X:
         width, height = int(min(width, self.width - x)), int(min(height, self.height - y))
         if width <= 0 or height <= 0:
             raise ValueError('Empty region')
+        shared = self.raw_shm(x, y, width, height)
+        if shared:
+            return shared
         image = _x.XGetImage(self.d, self.root, x, y, width, height, ctypes.c_ulong(-1).value, 2)
         if not image:
             raise ValueError('Image unavailable')
@@ -209,6 +237,45 @@ class X:
             return ctypes.string_at(value.data, value.bytes_per_line * value.height), value.width, value.height, value.bytes_per_line
         finally:
             _x.XDestroyImage(image)
+
+    def raw_shm(self, x, y, width, height):
+        """raw() through a shared-memory segment, or None to use XGetImage."""
+        if _xext is None or not _xext.XShmQueryExtension(self.d):
+            return None
+        segment = _ShmSegment()
+        image = _xext.XShmCreateImage(self.d, _x.XDefaultVisual(self.d, 0), _x.XDefaultDepth(self.d, 0), 2, None,
+                                      ctypes.byref(segment), width, height)
+        if not image:
+            return None
+        attached = False
+        try:
+            value = image.contents
+            size = value.bytes_per_line * value.height
+            segment.shmid = _libc.shmget(0, size, 0o1600)  # IPC_PRIVATE, owner read/write
+            if segment.shmid < 0:
+                return None
+            segment.shmaddr = _libc.shmat(segment.shmid, None, 0)
+            # Marked for removal now, so it is freed once both sides detach even if this process dies.
+            if segment.shmaddr in (None, ctypes.c_void_p(-1).value):
+                _libc.shmctl(segment.shmid, 0, None)
+                segment.shmaddr = None
+                return None
+            value.data = segment.shmaddr
+            attached = bool(_xext.XShmAttach(self.d, ctypes.byref(segment)))
+            _x.XSync(self.d, 0)
+            _libc.shmctl(segment.shmid, 0, None)
+            if not attached or not _xext.XShmGetImage(self.d, self.root, image, x, y, ctypes.c_ulong(-1).value):
+                return None
+            return ctypes.string_at(segment.shmaddr, size), value.width, value.height, value.bytes_per_line
+        finally:
+            if attached:
+                _xext.XShmDetach(self.d, ctypes.byref(segment))
+                _x.XSync(self.d, 0)
+            # XDestroyImage would free() the data pointer, which belongs to the segment.
+            image.contents.data = None
+            _x.XDestroyImage(image)
+            if segment.shmaddr:
+                _libc.shmdt(segment.shmaddr)
 
     def grab(self, x, y, width, height):
         data, width, height, stride = self.raw(x, y, width, height)
@@ -940,7 +1007,7 @@ def jpeg(image, motion=False, slow=False):
         image = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))), Image.BILINEAR)
         image.save(output, 'JPEG', quality=50 if slow else 60, subsampling=2)
     else:
-        image.save(output, 'JPEG', quality=94, subsampling=0)
+        image.save(output, 'JPEG', quality=92, subsampling=1)
     return output.getvalue()
 
 
@@ -1370,7 +1437,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(.5)
                 current, key, columns, bands, shown_layout = None, None, None, None, None
                 continue
-            time.sleep(max(.04, min(.15, latency() * .2)) if now - last_change < 1.5 else .25)
+            time.sleep(max(.016, min(.15, latency() * .2)) if now - last_change < 1.5 else .25)
 
     def push_frames(self, send, ready, sequence, latency=lambda: .1, quality='clear', desktop=False):
         if desktop:
@@ -1477,7 +1544,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Resend a complete picture rather than depending on an unsent change.
                 current, key, phone, shown_layout, shown_conversation = None, None, None, None, None
                 continue
-            time.sleep(max(.04, min(.15, latency() * .2)) if now - last_change < 1.5 else .25)
+            time.sleep(max(.016, min(.15, latency() * .2)) if now - last_change < 1.5 else .25)
 
     def binary(self, header, blobs):
         head = json.dumps(header, ensure_ascii=False).encode()
