@@ -6,7 +6,8 @@ FROM ${BASE_IMAGE}
 # Native wheels are installed for this image's architecture, never copied from a NAS.
 COPY mobile/requirements*.txt /opt/nas-chat-mobile/
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libx11-6 xclip xdotool python3-venv && \
+    apt-get install -y --no-install-recommends libx11-6 xclip xdotool python3-venv \
+        tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng && \
     python3 -m venv /opt/nas-chat-mobile/venv && \
     /opt/nas-chat-mobile/venv/bin/python3 -m pip install --no-cache-dir \
         -r /opt/nas-chat-mobile/requirements.txt && \

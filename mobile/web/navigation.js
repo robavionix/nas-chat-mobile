@@ -14,7 +14,7 @@ function cancelNavigationTransition(token=navigationTransition,completed=false){
   if(token.preview!==listNavigationSnapshot)releaseNavigationPane(token.preview);
   if(token.optimistic){document.body.classList.remove('swipe-return-pending');if(typeof fit==='function')fit()}
   token.resolve?.(completed);
-  renderDirty=true;
+  invalidateMobilePicture();
 }
 function beginNavigationTransition(direction,interactive=false){
   cancelNavigationTransition();
@@ -84,7 +84,7 @@ function commitBackSwipe(token){
     if(navigationTransition!==token)return;
     token.outgoing.hidden=true;token.preview.style.transform='none';
     for(const animation of token.animations)animation.cancel();
-    token.phase='waiting-frame';renderDirty=true;
+    token.phase='waiting-frame';invalidateMobilePicture();
   };
   try{
     if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches||!token.outgoing.animate)settled();
@@ -124,7 +124,7 @@ function settleNavigationTransition(token,completed=true){
   token.phase='settling';token.completed=completed;
   if(token.incoming){token.outgoing.hidden=true;token.incoming.style.transform='none'}
   for(const animation of token.animations)animation.cancel();
-  renderDirty=true;
+  invalidateMobilePicture();
   // Keep the snapshot until the live canvas has repainted at its final viewport size.
   clearTimeout(token.deadline);token.deadline=setTimeout(()=>cancelNavigationTransition(token,completed),250);
 }

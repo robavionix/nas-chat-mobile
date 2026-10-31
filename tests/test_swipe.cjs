@@ -4,7 +4,7 @@ function setup(){
   const c={box:{compact:true,screenWidth:760,screenHeight:2800},zoom:1,viewOnly:false,busy:false,navigating:false,
     screen:{getBoundingClientRect:()=>({left:0,top:0,width:390,height:600}),scrollWidth:390,clientWidth:390,scrollHeight:600,clientHeight:600,scrollTop:0},
     stage:{dataset:{panes:'{}'},getBoundingClientRect:()=>({left:0,top:0,right:390,bottom:600}),classList:{contains:()=>true}},
-    panes:null,chatOpen:()=>true,controls(){},scrollLocal(delta){scrolls++;return 0},panePosition:()=>({x:0,y:0}),remoteScroll(){},setZoom(){},message(){},tapRemote(){taps++},
+    panes:null,chatOpen:()=>true,controls(){},debugLog(){},scrollLocal(delta){scrolls++;return 0},panePosition:()=>({x:0,y:0}),remoteScroll(){},setZoom(){},message(){},tapRemote(){taps++},
     beginNavigationTransition(){return token={phase:'dragging',width:390,progress:0}},updateBackSwipe(t,distance){if(t)t.progress=Math.max(0,Math.min(t.width,distance))},
     commitBackSwipe(){commits++},cancelBackSwipe(){cancels++;return Promise.resolve()},cancelNavigationTransition(){cancels++},
     performance:{now:()=>now},setTimeout:()=>1,clearTimeout(){},requestAnimationFrame(fn){frames.set(++frameId,fn);return frameId},cancelAnimationFrame(id){frames.delete(id)},

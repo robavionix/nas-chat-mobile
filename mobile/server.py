@@ -21,7 +21,10 @@ ROOT = Path('/config/mobile')
 if os.environ.get('NAS_CHAT_BUNDLED_DEPS') != '1':
     sys.path.insert(0, str(ROOT / 'push-deps'))
 from push_service import PushService
+from desktop_presence import Presence, FocusParking
+from screen_activity import ScreenActivity
 push_service = PushService(ROOT)
+presence = Presence()
 UPLOADS = ROOT / 'uploads'
 lock = threading.Lock()
 keyfile = ROOT / 'session.key'
@@ -382,11 +385,18 @@ def detect_split(x, box):
 
 
 def qq_send_button(display, point, scale):
-    """Check the button footprint, not a lone blue avatar/sidebar pixel."""
+    """Recognize both button edges without sampling its white caption."""
     x, y = point
-    pixels = display.grab(x-18*scale,y,36*scale+1,8*scale+1)
-    colors = [pixels.getpixel(p) for p in ((18*scale,0),(0,8*scale),(36*scale,8*scale))]
-    return all(b > 200 and g > 100 and b-r > 25 and g-r > 15 for r,g,b in colors)
+    pixels = display.grab(x-24*scale, y, 48*scale+1, 8*scale+1)
+    def blue(column, row):
+        r, g, b = pixels.getpixel((column, row))
+        return b > 200 and g > 100 and b-r > 25 and g-r > 15
+    rows = [offset*scale for offset in (0, 2, 4, 6, 8)]
+    # The centre can be entirely covered by “发送”, particularly in group
+    # chats and at Retina scales. Both outside bands must still be blue.
+    sides = ((0, scale, 2*scale), (46*scale, 47*scale, 48*scale))
+    return all(sum(blue(column, row) for column in columns for row in rows)
+               >= len(columns)*len(rows)*.7 for columns in sides)
 
 
 def qq_capture_matches(display, current):
@@ -450,7 +460,10 @@ def qq_profile(display, box):
                     content_right = divider
         # A newly logged-in QQ has a conversation column but no selected chat,
         # so there is no editor/send button yet. The list must work on its own.
-        result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale,'density':.78},
+        # Keep row/text size stable when QQ narrows its native list column.
+        # Use a fixed logical reference width; both drawing and touch mapping
+        # consume the resulting density through the existing pane geometry.
+        result = {'list': {'x':box['x']+60*scale,'y':box['y']+40*scale,'width':split-60*scale,'height':box['height']-44*scale,'header':52*scale,'density':.68*(split-60*scale)/(316*scale)},
                   'chat': {'x':box['x']+split+2*scale,'y':box['y']+40*scale,'width':content_right-split-6*scale,
                            'height':box['height']-44*scale,'header':56*scale,
                            'headerWidth':450*scale,'headerRight':190*scale if content_right==box['width'] else 0,'fillViewport':True},
@@ -568,7 +581,7 @@ def layout():
                 # Chat text and list density have independent scales. Reflow a
                 # narrower native chat instead of clipping enlarged bubbles.
                 # The tall desktop retains history for local composited drags.
-                box['preferredWidth'] = 1100*QQ_SCALE+profile['sidebarWidth'] if profile['editorReady'] else box['width']
+                box['preferredWidth'] = 930*QQ_SCALE+profile['sidebarWidth'] if profile['editorReady'] else box['width']
                 if desktop_lease['clients']:
                     # A computer shows both columns at once; the phone's list/chat choice does not apply.
                     box['compactList'] = False
@@ -1187,6 +1200,8 @@ class Handler(BaseHTTPRequestHandler):
         return (self.headers.get('CF-Connecting-IP') or self.headers.get('X-Forwarded-For', '').split(',')[0].strip() or 'local')[:64]
 
     def frame(self, query):
+        if authenticated(self.headers):
+            presence.touch(('frame', push_owner(self.headers)[0]), 15)
         target = query.get('target', ['main'])[0]
         quality = picture_quality(query)
         try:
@@ -1264,6 +1279,8 @@ class Handler(BaseHTTPRequestHandler):
             aspect = .625
         state = {'open': True, 'acked': 0, 'sent': 0, 'heard': time.monotonic(), 'latency': .1, 'flight': {}}
         flight_lock = threading.Lock()
+        presence_token = object()
+        presence.touch(presence_token)
         write_lock = threading.Lock()
 
         def write(payload, opcode=2):
@@ -1278,6 +1295,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not frame or frame[0] == 8:
                         break
                     state['heard'] = time.monotonic()
+                    presence.touch(presence_token)
                     if frame[0] == 1 and re.fullmatch(rb'ack [0-9]{1,12}', frame[1]):
                         ack = int(frame[1][4:])
                         with flight_lock:
@@ -1293,6 +1311,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             finally:
                 state['open'] = False
+                presence.leave(presence_token)
 
         threading.Thread(target=listen, daemon=True).start()
 
@@ -1325,6 +1344,7 @@ class Handler(BaseHTTPRequestHandler):
             state['open'] = False
             if desktop:
                 desktop_leave()
+            presence.leave(presence_token)
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -1442,6 +1462,10 @@ class Handler(BaseHTTPRequestHandler):
     def push_frames(self, send, ready, sequence, latency=lambda: .1, quality='clear', desktop=False):
         if desktop:
             return self.capture_desktop(send, ready, sequence, latency, quality)
+        with ScreenActivity(x_lock) as activity:
+            return self.capture_frames(send, ready, sequence, latency, quality, activity)
+
+    def capture_frames(self, send, ready, sequence, latency, quality, activity):
         picture_profile = quality
         key, phone = None, None
         current, checked, shown_layout, shown_conversation = None, 0, None, None
@@ -1457,6 +1481,16 @@ class Handler(BaseHTTPRequestHandler):
                     current, checked = layout(), now
                 found = target_rect(current, 'popup' if current['popups'] else 'main')
                 snapshot = json.dumps(current, sort_keys=True)
+                damaged = activity.changed()
+                # A quiet frame needs no scrape, including the tail after a
+                # gesture. Keep checking damage quickly during active motion,
+                # and still capture final sharp refinements when needed.
+                refinement_delay = max(.3, min(1.2, latency()))
+                refining = phone is not None and any(
+                    low and now-stamp > refinement_delay for low, stamp in zip(phone.low, phone.stamp))
+                if key is not None and snapshot == shown_layout and not damaged and not refining:
+                    time.sleep(.04 if now - last_change < 1.5 else .1)
+                    continue
                 header, blobs = {}, []
                 if snapshot != shown_layout:
                     header['layout'] = current
@@ -1475,6 +1509,7 @@ class Handler(BaseHTTPRequestHandler):
                         qq_geometry_cache.clear()
                         current, checked = layout(), now
                         continue
+                    activity.captured()
                     pixels, body = memoryview(data), max(1, width - EDGE) * 4
                     rows = [zlib.crc32(pixels[i * stride:i * stride + body]) for i in range(height)]
                     edges = [zlib.crc32(pixels[i * stride + body:i * stride + width * 4]) for i in range(height)]
@@ -1613,6 +1648,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(400, error='请求格式错误')
             if self.path == '/login':
                 return self.login(payload)
+            if self.path == '/presence':
+                if not authenticated(self.headers):
+                    return self.reply(401, error='请重新登录')
+                identity, sequence, visible = payload.get('id'), payload.get('sequence'), payload.get('visible')
+                if (not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{32}', identity)
+                        or type(sequence) is not int or not 0 < sequence < 2**53 or type(visible) is not bool):
+                    return self.reply(400, error='请求格式错误')
+                presence.report(('page', push_owner(self.headers)[0], identity), sequence, visible)
+                return self.reply(200, ok=True)
             if self.path.startswith('/push/'):
                 if not authenticated(self.headers):
                     return self.reply(401, error='请重新登录')
@@ -1724,7 +1768,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = {'window': self.headers.get('X-Window'), 'conversation': unquote(self.headers.get('X-Conversation', ''))}
         except ValueError:
             return self.reply(400, error='请求格式错误')
-        if not 0 < length <= MAX_UPLOAD:
+        if length <= 0:
+            return self.reply(400, error='上传内容为空或缺少长度，请重新选择文件')
+        if length > MAX_UPLOAD:
             return self.reply(413, error='单个文件不能超过 95MB')
         if not re.fullmatch(r'[A-Za-z0-9-]{12,64}', request_id):
             return self.reply(400, error='请求格式错误')
@@ -1803,12 +1849,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def tap(self, payload):
         x, y, button = payload.get('x'), payload.get('y'), payload.get('button', 1)
-        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y)) or button not in (1, 3):
+        click_count = payload.get('clickCount', 1)
+        if (not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y, click_count))
+                or button not in (1, 3) or click_count not in (1, 2)):
             return self.reply(400, error='触摸位置无效')
         started, current = time.monotonic(), layout()
         if payload.get('target') == 'desktop':
             return self.desktop_tap(current, x, y, button, payload.get('clickCount', 1), started)
-        debug('tap', target=payload.get('target'), x=x, y=y, button=button, sent=payload.get('conversation'), before=brief(current),
+        if click_count == 2:
+            region = pane_region(current, 'chat')
+            if (current.get('client') != 'qq' or current.get('compactList') or current['popups'] or button != 1
+                    or payload.get('target') == 'popup' or not current['chatReady']
+                    or not region['y']+region['header'] <= y < region['y']+region['height']):
+                return self.reply(400, error='双击预览仅支持 QQ 聊天内容')
+        debug('tap', target=payload.get('target'), x=x, y=y, button=button, clickCount=click_count, sent=payload.get('conversation'), before=brief(current),
               signature=isinstance(payload.get('signature'), list))
         if payload.get('target') == 'popup':
             popup = next((p for p in current['popups'] if p['id'] == str(payload.get('window'))), None)
@@ -1878,7 +1932,10 @@ class Handler(BaseHTTPRequestHandler):
             navigation.update(list=False,revision=navigation['revision']+1)
             result = fit_qq(layout())
             return self.reply(200,ok=True,layout=result,navigation=True)
-        native_click(current, x, y, button, guard=True)
+        native_click(current, x, y, button, guard=click_count == 1)
+        if click_count == 2:
+            time.sleep(.08)
+            native_click(current, x, y, button, activate=False, guard=False)
         if button == 3:
             result = wait_layout(lambda now: bool(now['popups']), 1.0)
             debug('tap-result', after=brief(result), seconds=round(time.monotonic() - started, 2))
@@ -2085,5 +2142,83 @@ class Handler(BaseHTTPRequestHandler):
 
 UPLOADS.mkdir(mode=0o700, exist_ok=True)
 threading.Thread(target=clean_uploads, daemon=True).start()
-push_service.start()
+def notification_snapshot(fresh=False):
+    """Read a bounded list; restore narrow WeChat before releasing the UI lock."""
+    if not lock.acquire(timeout=.04):
+        return None
+    try:
+        current = layout()
+        if current.get('popups') or not current.get('chatReady'):
+            return None
+        key = push_service.client.key
+        if key == 'qq':
+            region = current.get('panes', {}).get('list')
+            if not region: return None
+            unit = current.get('uiScale', 1)
+        else:
+            unit = 1
+            region = {'x':current['x']+106,'y':current['y']+48,'width':current['width']-106,
+                      'height':current['height']-52,'header':90}
+            if not current.get('compactList'):
+                # Only while all phones are away and the native focus has been
+                # parked. A foreground page or manual desktop use cancels this.
+                if not presence.idle():
+                    notification_snapshot.cache = None
+                    return None
+                focus = run('xdotool','getwindowfocus')
+                with X() as display:
+                    attributes = display.attrs(int(focus))
+                    if not attributes or attributes.class_ != 2: return None
+                identity = (current['id'],current['x'],current['y'],current['width'],current['height'],current.get('conversation'))
+                cached = getattr(notification_snapshot,'cache',None)
+                if cached and cached[0] == identity and not fresh and time.monotonic()-cached[1][2] < 1.5:
+                    return cached[1]
+                width = min(current['screenWidth'],1414)
+                if width < 1200: return None
+                # Hold X's existing lock throughout resize/read/restore. A
+                # waking phone cannot capture the temporary wide geometry.
+                with X() as display:
+                    if not presence.idle(): return None
+                    try:
+                        run('xdotool','windowsize',current['id'],str(width),str(current['height']))
+                        time.sleep(.10)
+                        split_cache.clear()
+                        split = detect_split(display,dict(current,width=width))
+                        if not split or not 260 < split < width-400: return None
+                        # Keep the message column at its original width.
+                        fitted = split+2+current['width']-(current.get('split') or 104)-2
+                        if fitted <= current['screenWidth'] and fitted != width:
+                            run('xdotool','windowsize',current['id'],str(fitted),str(current['height']))
+                            time.sleep(.06)
+                        region['width'] = split-106
+                        rect = (region['x'],region['y']+region['header'],region['width'],min(region['height']-region['header'],114*16))
+                        image = display.grab(*rect)
+                        value = (image,{'client':key,'unit':unit,'window':current['id'],'rect':rect},time.monotonic())
+                        notification_snapshot.cache = (identity,value)
+                        return value
+                    finally:
+                        run('xdotool','windowsize',current['id'],str(current['width']),str(current['height']))
+                        time.sleep(.06)
+                        split_cache.clear()
+        height = min(region['height']-region['header'], (80 if key == 'qq' else 114)*unit*16)
+        if height < 80 or region['width']*height > 4_000_000: return None
+        rect = (region['x'],region['y']+region['header'],region['width'],height)
+        with X() as display: image = display.grab(*rect)
+        return image, {'client':key,'unit':unit,'window':current['id'],'rect':rect}
+    except (ValueError, OSError):
+        return None
+    finally:
+        lock.release()
+
+
+notification_snapshot.clear = lambda: setattr(notification_snapshot,'cache',None)
+push_service.start(notification_snapshot)
+focus_parking = FocusParking(client.window_classes)
+def park_client_focus():
+    with x_lock:
+        return focus_parking.park()
+def has_push_devices():
+    with push_service.lock:
+        return push_service.enabled and any(item['expires'] > time.time() for item in push_service.records.values())
+presence.start(lock, has_push_devices, park_client_focus)
 ThreadingHTTPServer(('127.0.0.1', 8089), Handler).serve_forever()

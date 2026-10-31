@@ -13,6 +13,7 @@ function setup(reduced=false){
     setTimeout(fn){timers.set(++timerId,fn);return timerId},clearTimeout(id){timers.delete(id)},
     document:{hidden:false,body:element(),createElement:element,addEventListener(name,fn){listeners[name]=fn}},
     window:{matchMedia:()=>({matches:reduced}),dispatchEvent(){},addEventListener(name,fn){listeners[name]=fn}}};
+  context.invalidateMobilePicture=()=>{context.renderDirty=true};
   vm.runInNewContext(source,context);
   return {context,animations,timers,listeners};
 }
@@ -73,10 +74,10 @@ async function exercise(reduced=false){
   c.box=list;c.mirror.layout=list;c.renderDirty=false;finished=c.finishNavigationTransition(token,list);
   assert.equal(await finished,true);assert.equal(animations.length,countBefore+2,'a late frame must not start a second slide');
   const render=fs.readFileSync('mobile/web/render.js','utf8');
-  const paint=render.slice(render.indexOf('function pictureLayoutMatches(){'),render.lastIndexOf('requestAnimationFrame(paintMobile);'));
+  const paint=render.slice(render.indexOf('function pictureLayoutMatches(){'),render.lastIndexOf('requestMobilePaint();'));
   let clears=0,painted=0;
   Object.assign(c,{requestAnimationFrame(){},view:'chat',box:{conversation:'new',compactList:false,popups:[]},mirror:{ready:true,version:8,layout:{conversation:'old',compactList:false,popups:[]}},
-    panes:{width:390,height:600,sections:[]},scrollCache:null,scrollClip:null,renderDirty:true,visualPending:false,paintedVersion:7,
+    panes:{width:390,height:600,sections:[]},scrollCache:null,scrollClip:null,renderDirty:true,visualPending:false,paintedVersion:7,followUntil:0,
     pictureContext:{setTransform(){},fillRect(){clears++}},findContentBottom(){},drawDesktop(){},
     navigationPicturePainted(){painted++}});
   c.document.querySelector=()=>({classList:{add(){},remove(){}}});

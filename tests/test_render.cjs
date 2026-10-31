@@ -11,7 +11,7 @@ function canvas(width,height){
 function setup(){
   const mirrorCanvas=canvas(12,24),shiftCanvas=canvas(1,1),mirror={ready:true,key:'old',rect:[0,0,12,24],version:1};
   const c={mirrorCanvas,mirrorContext:mirrorCanvas,shiftCanvas,shiftContext:shiftCanvas,mirror,
-    performance:{now:()=>0},acceptLayout(){},followShift(){},renderDirty:false,decodeImage:async()=>({value:9,close(){}}),Blob,Uint8Array,Error};
+    performance:{now:()=>0},acceptLayout(){},followShift(){},requestMobilePaint(){},renderDirty:false,decodeImage:async()=>({value:9,close(){}}),Blob,Uint8Array,Error};
   vm.runInNewContext(source.slice(source.indexOf('async function applyMessage('),source.indexOf('async function applyFrame(')),c);
   return c;
 }

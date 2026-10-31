@@ -7,16 +7,18 @@ p=Path('/etc/nginx/sites-enabled/default')
 s=p.read_text()
 web_root = '/var/www/nas-chat-mobile/' if Path('/var/www/nas-chat-mobile').is_dir() else '/config/mobile/web/'
 web_marker = '# mobile-static-root=' + web_root
-if '# mobile-session-v13' not in s or web_marker not in s:
+if '# mobile-session-v14' not in s or web_marker not in s:
     s=re.sub(r'  # mobile-wechat\n.*?(?=  location / \{)', '', s, flags=re.S)
     s=re.sub(r'  auth_basic\s+"Login";\n', '', s)
     s=re.sub(r'  auth_basic_user_file\s+/etc/nginx/.htpasswd;\n', '', s)
     block=r'''  # mobile-wechat
-  # mobile-session-v13
+  # mobile-session-v14
   absolute_redirect off;
   auth_request /_mobile_auth;
   location = /_mobile_auth {
     internal;
+    # auth_request inherits the original Content-Length even without its body.
+    client_max_body_size 100m;
     auth_request off;
     proxy_pass http://127.0.0.1:8089/auth-check;
     proxy_pass_request_body off;
@@ -92,6 +94,13 @@ if '# mobile-session-v13' not in s or web_marker not in s:
     add_header X-Content-Type-Options "nosniff" always;
     error_page 401 = /_mobile_login_redirect;
   }
+  location ~ ^/mobile/(panes|app|render|navigation|push|touch|presence|keyboard)\.js$ {
+    alias /config/mobile/web/$1.js;
+    default_type application/javascript;
+    add_header Cache-Control "private, max-age=0, must-revalidate" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    error_page 401 = /_mobile_login_redirect;
+  }
   location = /mobile-api/upload {
     proxy_pass http://127.0.0.1:8089/upload;
     client_max_body_size 100m;
@@ -123,7 +132,7 @@ if '# mobile-session-v13' not in s or web_marker not in s:
     proxy_read_timeout 30s;
   }
 '''
-    block=block.replace('/config/mobile/web/', web_root).replace('# mobile-session-v13', '# mobile-session-v13\n  ' + web_marker)
+    block=block.replace('/config/mobile/web/', web_root).replace('# mobile-session-v14', '# mobile-session-v14\n  ' + web_marker)
     s=s.replace('  location / {',block+'  location / {')
     p.write_text(s)
 # mobile-ws-token-v1: the picture stream authenticates itself (cookie or stream token), so the

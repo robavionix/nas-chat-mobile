@@ -10,7 +10,7 @@ class FakeSocket{
 const mirror={epoch:0,frames:0,bytes:0};
 const context={frameQuality:()=>'clear',mirror,WebSocket:FakeSocket,location:{protocol:'https:',host:'test.invalid'},document:{hidden:false},view:'chat',
   performance,ArrayBuffer,DataView,Uint8Array,TextDecoder,Number,JSON,Error,
-  setInterval,clearInterval,controls:()=>{},releaseScrollCache:()=>{},transportStatus:()=>{},requestAnimationFrame:callback=>setTimeout(callback,0),
+  setInterval,clearInterval,controls:()=>{},releaseScrollCache:()=>{},suspendMobilePainting:()=>{},transportStatus:()=>{},requestAnimationFrame:callback=>setTimeout(callback,0),
   applyMessage:()=>new Promise(resolve=>{draws++;appliedResolve=resolve})};
 vm.runInNewContext(code,context);
 function message(seq){const h=Buffer.from(JSON.stringify({seq,key:'test',strips:[]})),out=Buffer.alloc(8+h.length);out.writeUInt32BE(h.length);h.copy(out,8);return out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength)}

@@ -281,7 +281,7 @@
     if (draftChat) drafts.set(draftChat, draft.value);
     draftChat = box.conversation;
     draft.value = drafts.get(draftChat) || '';
-    if (!draft.value) readNative(false);
+    if (!draft.value) readNative(box?.client === 'qq');
   }
   function hasInk(region) {
     // Whether the client's own box already holds something (a draft typed on a phone, a picked emoji).
@@ -295,10 +295,10 @@
   async function readNative(force) {
     if (busySync || !typing || !box?.conversation || (!force && !hasInk(typing.text))) return;
     busySync = true;
-    const chat = box.conversation;
+    const chat = box.conversation, before = draft.value;
     try {
       const result = await call('input', {action: 'read', window: box.id, conversation: chat});
-      if (chat === draftChat && typeof result.text === 'string' && result.text !== draft.value) {
+      if (chat === draftChat && draft.value === before && typeof result.text === 'string' && result.text !== draft.value) {
         draft.value = result.text; drafts.set(chat, draft.value);
         draft.setSelectionRange(draft.value.length, draft.value.length);
       }

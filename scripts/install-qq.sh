@@ -9,7 +9,8 @@ esac
 apt-get update
 apt-get install -y --no-install-recommends curl ca-certificates fonts-noto-cjk \
   libx11-6 xclip xdotool python3-venv libnss3 libgbm1 libasound2t64 \
-  libgtk-3-0t64 libxss1 libxtst6 libatomic1
+  libgtk-3-0t64 libxss1 libxtst6 libatomic1 \
+  tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng
 package=$(mktemp /tmp/qq.XXXXXXXX.deb)
 trap 'rm -f -- "$package"' EXIT
 # Fixed, tested Tencent distribution. Do not silently install a different UI version.

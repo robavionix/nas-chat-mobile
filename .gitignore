@@ -28,3 +28,11 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+mobile/login-password
+
+mobile/preview-audit-*/
+
+mobile/*.preview-*-tmp
+
+mobile/maintenance/

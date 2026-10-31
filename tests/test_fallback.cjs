@@ -8,7 +8,7 @@ async function exercise(hideOnFailure){
   const mirror={mode:'websocket',key:'old',since:12,epoch:0,ready:true};
   const document={hidden:false};
   const context={frameQuality:()=>'clear',mirror,document,view:'chat',box:{},AbortController,performance:{now:()=>time},
-    setTimeout:(_callback,delay)=>{if(delay===300)throw STOP;return 1},clearTimeout:()=>{},
+    waitForMirror:async()=>{throw STOP},setTimeout:()=>1,clearTimeout:()=>{},
     mirrorTarget:()=> 'main',transportStatus:()=>statuses.push(mirror.mode),
     socketMirror:async()=>{
       sockets++;

@@ -50,13 +50,43 @@ for(const [width,height] of [[320,440],[390,700],[430,780]]){
 }
 for(const width of [320,390,430]){
   const regular={uiScale:3,panes:{list:{x:180,y:120,width:949,height:5808,header:156}}};
-  const dense={uiScale:3,panes:{list:{...regular.panes.list,density:.78}}};
+  const dense={uiScale:3,panes:{list:{...regular.panes.list,density:.68}}};
   const p=mobilePanes(dense,'list',width,700),previous=mobilePanes(regular,'list',width,700),body=p.sections.at(-1);
   assert.equal(p.width,width);assert.equal(p.headerHeight,previous.headerHeight,'search controls keep their readable size');
-  assert.ok(Math.abs(p.scale/previous.scale-.78)<1e-6);
+  assert.ok(Math.abs(p.scale/previous.scale-.68)<1e-6);
   assert.ok(body.height>previous.sections.at(-1).height,'smaller list text exposes more rows');
   assert.ok(Math.abs(body.dx+body.dw/2-width/2)<1e-6);
   assert.equal(panePosition(p,width/2,body.dy+30).x,655);
   assert.equal(panePosition(p,1,body.dy+30).x,180,'left background gutter selects the same native row');
   assert.equal(panePosition(p,width-1,body.dy+30).x,1128,'right background gutter stays inside the native list');
+}
+// QQ reflows its conversation column with the native window. Body text and
+// row height must stay fixed on the phone, independent of that column width.
+for(const width of [320,390,430]){
+  let rowHeight=null;
+  for(const nativeWidth of [738,883,949]){
+    const box={uiScale:3,panes:{list:{x:180,y:120,width:nativeWidth,height:5808,header:156,density:.68*nativeWidth/(316*3)}}};
+    const p=mobilePanes(box,'list',width,700),body=p.sections.at(-1),height=240*p.scale;
+    if(rowHeight!==null)assert.ok(Math.abs(height-rowHeight)<1e-6,'native reflow cannot undo mobile list density');
+    rowHeight=height;
+    assert.equal(panePosition(p,width/2,body.dy+height/2).x,Math.round(180+nativeWidth/2));
+    assert.equal(panePosition(p,width-1,body.dy+height/2).x,180+nativeWidth-1);
+  }
+}
+// Keep the accepted text/row size while removing the centered blank gutters.
+for(const width of [320,390,430]){
+  const list={x:180,y:120,width:883,height:5808,header:156,density:.68*883/(316*3)};
+  const regular=mobilePanes({uiScale:3,panes:{list}},'list',width,700);
+  const p=mobilePanes({client:'qq',uiScale:3,panes:{list}},'list',width,700),body=p.sections.at(-1);
+  assert.equal(p.scale,regular.scale,'font and row scales stay unchanged');
+  assert.equal(p.headerHeight,regular.headerHeight,'search controls keep their existing size');
+  assert.ok(body.dx<5,'avatar band starts near the left edge on every iPhone width');
+  assert.equal(body.reflowList.rightInset,42);
+  const y=body.dy+30,row=panePosition(p,1,y).y;
+  for(const x of [1,width/2,width-1]){
+    const point=panePosition(p,x,y);
+    assert.equal(point.y,row,'both edges and the relocated timestamp select the same conversation');
+    assert.ok(point.x>=list.x&&point.x<=list.x+list.width-36,'all row taps stay inside the native row, away from its separator');
+  }
+  assert.deepEqual(panePosition(p,width/2,20),panePosition(regular,width/2,20),'header search mapping stays exact');
 }

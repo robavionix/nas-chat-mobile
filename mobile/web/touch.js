@@ -4,6 +4,37 @@
   let gesture = null, pinch = null, carry = 0, inertia = 0, pressTimer = 0;
   const fingers = new Map();
   let pendingDelta=0,scrollFrame=0;
+  let lastTap=null,tapEpoch=0;
+  function sameChatTap(tap){
+    return !!tap&&box?.client==='qq'&&view==='chat'&&!popupActive()&&!box.compactList
+      &&box.id===tap.window&&box.conversation===tap.conversation;
+  }
+  function recentChatTap(x,y){
+    return sameChatTap(lastTap)
+      &&performance.now()-lastTap.time<400&&Math.hypot(x-lastTap.x,y-lastTap.y)<24;
+  }
+  function qqChatPoint(point){
+    const region=box?.panes?.chat;
+    return box?.client==='qq'&&view==='chat'&&!popupActive()&&!box.compactList&&region
+      &&point.y>=region.y+region.header&&point.y<region.y+region.height;
+  }
+  function tapPicture(point,x,y,previous=null,epoch=tapEpoch){
+    if(previous){
+      lastTap=null;
+      if(epoch!==tapEpoch||!sameChatTap(previous)||Math.hypot(x-previous.x,y-previous.y)>=24)return;
+      // The first click is immediate. Retain the second tap while its response
+      // is in flight, then perform a real native double-click in the same chat.
+      debugLog('touch-double-queued');
+      previous.wait.then(()=>{
+        if(epoch===tapEpoch&&!busy&&!navigating&&sameChatTap(previous))tapRemote(previous.point,1,2);
+        else debugLog('touch-double-cancelled',{busy,navigating,context:sameChatTap(previous)});
+      });
+      return;
+    }
+    const saved=qqChatPoint(point)?{point,x,y,time:performance.now(),window:box.id,conversation:box.conversation}:null;
+    const wait=Promise.resolve(tapRemote(point,1));
+    lastTap=saved?{...saved,wait}:null;
+  }
   function flushLocal(){cancelAnimationFrame(scrollFrame);scrollFrame=0;const delta=pendingDelta;pendingDelta=0;if(delta&&!busy&&!navigating){try{wheel(delta)}catch(err){stop();message(err.message,true)}}}
   function queueLocal(delta){pendingDelta+=delta;if(!scrollFrame)scrollFrame=requestAnimationFrame(flushLocal)}
   function stop(reset=true) { cancelAnimationFrame(inertia); inertia = 0; if(reset) carry = 0; }
@@ -59,6 +90,7 @@
   }
   function cancelPress() { clearTimeout(pressTimer); pressTimer=0; }
   function interrupt(){
+    lastTap=null;tapEpoch++;
     stop();cancelPress();cancelAnimationFrame(scrollFrame);cancelAnimationFrame(gesture?.backFrame);
     if(gesture?.back)cancelNavigationTransition(gesture.back);
     scrollFrame=0;pendingDelta=0;gesture=null;pinch=null;fingers.clear();
@@ -66,26 +98,30 @@
   layer.addEventListener('pointerdown', e => {
     if (e.pointerType==='mouse' && e.button!==0) return;
     e.preventDefault(); stop();
-    if(busy||navigating)return;
+    const second=recentChatTap(e.clientX,e.clientY)?lastTap:null;
+    if(busy||navigating&&!second){debugLog('touch-down-blocked',{busy,navigating});return;}
     // iOS can lose capture during a keyboard/viewport change without delivering
     // pointerup. A fresh primary touch must not become a permanent fake pinch.
     if(e.isPrimary&&fingers.size)interrupt();
     fingers.set(e.pointerId,{x:e.clientX,y:e.clientY});
-    layer.setPointerCapture(e.pointerId);
+    try{layer.setPointerCapture(e.pointerId)}catch{debugLog('touch-capture-unavailable')}
     if (fingers.size===2) {
       // A second finger turns the gesture into a pinch.
+      lastTap=null;tapEpoch++;
       cancelPress();if(gesture?.back){cancelAnimationFrame(gesture.backFrame);cancelNavigationTransition(gesture.back)}gesture=null;
       const p=distance(); pinch={start:p.d,zoom,x:p.x,y:p.y};
       return;
     }
-    if (fingers.size>2 || busy || navigating) { gesture=null; return; }
-    gesture={id:e.pointerId,x:e.clientX,y:e.clientY,lastX:e.clientX,lastY:e.clientY,time:performance.now(),lastTime:performance.now(),velocity:0,moved:false,pressed:false};
+    if (fingers.size>2 || busy || navigating&&!second) { gesture=null; return; }
+    gesture={id:e.pointerId,pointerType:e.pointerType,x:e.clientX,y:e.clientY,lastX:e.clientX,lastY:e.clientY,time:performance.now(),lastTime:performance.now(),velocity:0,moved:false,pressed:false,second,epoch:tapEpoch};
+    try{gesture.qqBody=!!qqChatPoint(position(e.clientX,e.clientY))}catch{gesture.qqBody=false}
+    if(gesture.qqBody)gesture.context={window:box.id,conversation:box.conversation};
     const g=gesture;
     const edge=e.clientX-screen.getBoundingClientRect().left;
     g.edge=e.pointerType==='touch'&&edge>=0&&edge<=28&&zoom<=1.01&&!viewOnly&&chatOpen()&&box.compact;
     pressTimer=setTimeout(()=>{
       if(gesture!==g||g.moved||viewOnly)return;
-      g.pressed=true; navigator.vibrate?.(12); ripple(g.x,g.y,true);
+      lastTap=null;tapEpoch++;g.pressed=true; navigator.vibrate?.(12); ripple(g.x,g.y,true);
       try { tapRemote(position(g.x,g.y),3); } catch(err) { message(err.message,true); }
     },LONG_PRESS);
   });
@@ -113,7 +149,7 @@
       if(!g.backFrame)g.backFrame=requestAnimationFrame(()=>{g.backFrame=0;if(gesture===g)updateBackSwipe(g.back,g.backDistance||0)});
       return;
     }
-    if (!gesture.moved && Math.hypot(e.clientX-gesture.x,e.clientY-gesture.y)>8) { gesture.moved=true; cancelPress(); }
+    if (!gesture.moved && Math.hypot(e.clientX-gesture.x,e.clientY-gesture.y)>8) { gesture.moved=true;lastTap=null;tapEpoch++;cancelPress(); }
     if (gesture.moved && !gesture.pressed) {
       if (screen.scrollWidth>screen.clientWidth+1) screen.scrollLeft-=dx;
       try { queueLocal(-dy); } catch(err) { message(err.message,true); }
@@ -126,6 +162,7 @@
     if (pinch) { if(!fingers.size) pinch=null; return; }
     if (!gesture || gesture.id!==e.pointerId) return;
     const g=gesture; gesture=null; e.preventDefault(); cancelPress();flushLocal();
+    debugLog('touch-finish',{source:e.type,pointer:g.pointerType,cancelled,moved:g.moved,second:!!g.second});
     if(g.back){
       cancelAnimationFrame(g.backFrame);updateBackSwipe(g.back,Math.max(0,e.clientX-g.x));
       const quick=performance.now()-g.lastTime<100&&(g.velocityX||0)>.5&&g.back.progress>40;
@@ -133,17 +170,34 @@
       else{navigating=true;controls();cancelBackSwipe(g.back).finally(()=>{navigating=false;controls()})}
       return;
     }
-    if (cancelled || g.pressed) { stop(); return; }
+    if (cancelled || g.pressed) { lastTap=null;tapEpoch++;stop();return; }
     if (g.moved) { if(performance.now()-g.lastTime<100) coast(g.velocity); return; }
     if (viewOnly) return;
+    if(g.qqBody&&!sameChatTap(g.context))return;
     ripple(e.clientX,e.clientY);
-    try { tapRemote(position(e.clientX,e.clientY),1); } catch(err) { message(err.message,true); }
+    try { tapPicture(position(e.clientX,e.clientY),e.clientX,e.clientY,g.second,g.epoch); } catch(err) { message(err.message,true); }
   }
   layer.addEventListener('pointerup', e=>finish(e));
   layer.addEventListener('pointercancel', e=>finish(e,true));
-  layer.addEventListener('lostpointercapture',e=>finish(e,true));
+  layer.addEventListener('lostpointercapture',e=>{
+    // QQ touch taps also listen for the actual finger release. Losing capture
+    // alone is not a cancellation; pointercancel still cancels immediately.
+    if(gesture?.id===e.pointerId&&gesture.pointerType==='touch'&&gesture.qqBody){cancelPress();debugLog('touch-capture-lost');return;}
+    finish(e,true);
+  });
+  layer.addEventListener('touchend',e=>{
+    const g=gesture;
+    if(!g||g.pointerType!=='touch'||!g.qqBody||pinch||e.touches.length||e.changedTouches.length!==1)return;
+    const touch=e.changedTouches[0];
+    if(Math.hypot(touch.clientX-g.lastX,touch.clientY-g.lastY)>=24)return;
+    // Either event may arrive first. finish() consumes the gesture once, so
+    // touchend followed by pointerup never sends a duplicate click.
+    finish({type:'touchend',pointerId:g.id,clientX:touch.clientX,clientY:touch.clientY,preventDefault:()=>e.preventDefault()});
+  },{passive:false});
+  layer.addEventListener('touchcancel',e=>{if(gesture?.qqBody)finish({type:'touchcancel',pointerId:gesture.id,clientX:gesture.lastX,clientY:gesture.lastY,preventDefault:()=>e.preventDefault()},true)});
   layer.addEventListener('wheel',e=>{
     e.preventDefault();
+    lastTap=null;tapEpoch++;
     if(busy||navigating)return;
     if(e.ctrlKey){setZoom(zoom*Math.exp(-e.deltaY/300),e.clientX,e.clientY);return;}
     stop(false);
@@ -151,7 +205,7 @@
   },{passive:false});
   layer.addEventListener('contextmenu',e=>e.preventDefault());
   window.addEventListener('resize',interrupt);
-  window.addEventListener('nas-navigation-start',()=>{stop();cancelAnimationFrame(scrollFrame);cancelAnimationFrame(gesture?.backFrame);scrollFrame=0;pendingDelta=0;cancelPress();gesture=null;pinch=null;fingers.clear()});
+  window.addEventListener('nas-navigation-start',()=>{lastTap=null;tapEpoch++;stop();cancelAnimationFrame(scrollFrame);cancelAnimationFrame(gesture?.backFrame);scrollFrame=0;pendingDelta=0;cancelPress();gesture=null;pinch=null;fingers.clear()});
   window.addEventListener('pagehide',interrupt);
   document.addEventListener('visibilitychange',()=>{if(document.hidden)interrupt()});
 })();

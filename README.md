@@ -1,6 +1,6 @@
 # nas-chat-mobile
 
-当前版本：**0.6.2** · [更新记录](CHANGELOG.md)
+当前版本：**0.6.3** · [更新记录](CHANGELOG.md)
 
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
@@ -242,8 +242,15 @@ bash tests/test_lan.sh
 
 ## English summary
 
-**nas-chat-mobile 0.6.2** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP frames settle to lossless PNG. A second picture may be in flight while little data is unacknowledged, and moving strips use a lighter full-resolution JPEG before being refined. Computer browsers and iPads get a desktop view of the full two-pane client with instant local typing over the native input box, and a page opened at the public address can stream its picture over the home network when the device trusts the LAN certificate. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
+**nas-chat-mobile 0.6.3** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP frames settle to lossless PNG. A second picture may be in flight while little data is unacknowledged, and moving strips use a lighter full-resolution JPEG before being refined. Computer browsers and iPads get a desktop view of the full two-pane client with instant local typing over the native input box, and a page opened at the public address can stream its picture over the home network when the device trusts the LAN certificate. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
 
 Native Linux amd64 and arm64 deployments share one Compose configuration. The local Docker build installs isolated Python and X11 dependencies; setup, environment checks, health checks and Synology instructions are included. See [Linux deployment and validation scope](docs/linux-deployment.md).
 
 This is an unofficial project. It is not affiliated with or endorsed by Tencent. "WeChat" and "Weixin" are trademarks of Tencent and are mentioned only to describe compatibility. The project does not include, modify, or reverse-engineer any Tencent software or protocol. Use it only with your own account and in compliance with the platform's terms and applicable law; do not use it for bulk messaging, marketing, bots, or monitoring others. Provided as is, without warranty, under the [MIT License](LICENSE).
+
+
+### 通知预览准确性
+
+标准桌面通知提供的标题和正文优先显示。客户端只产生消息提示音时，可在开启“通知显示内容”后，从本机会话列表读取中文或英文预览；仅限能唯一对应的新近变化，名字和正文需通过交叉校验。名称被裁断、正文无法确认、多个会话同时变化或列表不可用时，只发送普通新消息提醒。
+
+列表预览可能截断，也可能识别错误，并不是完整聊天原文；需要精确内容时请打开对话。关闭内容预览后停止识别，并在投递前再次检查开关。聊天数据库、账号数据和识别图片不进入仓库，通知来源状态也不保存聊天正文。测试通知仅验证投递通道，不能验证真实消息内容。

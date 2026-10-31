@@ -85,7 +85,7 @@ class ClientTests(unittest.TestCase):
                    'popups':[],'compactList':True,'chatReady':True}
         profile = scope['qq_profile'](Display(),current)
         self.assertIsNotNone(profile)
-        self.assertEqual(profile['list'],{'x':60,'y':40,'width':246,'height':856,'header':52,'density':.78})
+        self.assertEqual(profile['list'],{'x':60,'y':40,'width':246,'height':856,'header':52,'density':.68*246/316})
         self.assertEqual(profile['chat'],{'x':308,'y':40,'width':648,'height':649,'header':56,'headerWidth':450,'headerRight':190,'fillViewport':True})
         current.update(panes={key:profile[key] for key in ('list','chat')},inputPoint=profile['inputPoint'],sendPoint=profile['sendPoint'])
         self.assertEqual(scope['input_point'](current),[633,769])

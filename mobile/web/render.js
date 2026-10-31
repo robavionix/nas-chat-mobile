@@ -7,14 +7,27 @@ const headerCanvas=document.createElement('canvas'),headerContext=headerCanvas.g
 const sampleCanvas=document.createElement('canvas'),sampleContext=sampleCanvas.getContext('2d',{willReadFrequently:true});
 const shiftCanvas=document.createElement('canvas'),shiftContext=shiftCanvas.getContext('2d',{alpha:false});
 const scrollBodyCanvas=document.createElement('canvas'),scrollBodyContext=scrollBodyCanvas.getContext('2d',{alpha:false});
+const listLayoutCanvas=document.createElement('canvas'),listLayoutContext=listLayoutCanvas.getContext('2d',{willReadFrequently:true});
 let scrollCache=null;
 let scrollClip=null;
 headerCanvas.width=64;headerCanvas.height=16;
 const mirror={key:null,rect:null,layout:null,version:-1,alive:0,ready:false,changed:0,controller:null,target:null,mode:'websocket',failures:0,streamed:false,socket:null,epoch:0,retryAt:0,frames:0,bytes:0};
 let boundsVersion=-1;
 let panes=null,boundsTime=0,contentBottom=null,localOffset=0,lastPaneView=null,waitingHeader=null,renderDirty=true,followUntil=0,paintedVersion=-1;
+let paintRequest=0,boundsTimer=0;
+// Stay asleep on an unchanged screen. Gestures, complete frames and layout
+// changes share one paint opportunity, even when they arrive in a burst.
+function requestMobilePaint(){
+  if(paintRequest||document.hidden||view==='full')return;
+  paintRequest=requestAnimationFrame(now=>{paintRequest=0;paintMobile(now)});
+}
+function invalidateMobilePicture(){renderDirty=true;requestMobilePaint()}
+function suspendMobilePainting(){
+  if(paintRequest)cancelAnimationFrame(paintRequest);
+  paintRequest=0;clearTimeout(boundsTimer);boundsTimer=0;
+}
 // After sending or switching chats, keep following the newest message for a moment.
-function resetMessagePicture(keepBottom=false){localOffset=0;if(!keepBottom)contentBottom=null;boundsTime=0;renderDirty=true;followUntil=performance.now()+3000}
+function resetMessagePicture(keepBottom=false){localOffset=0;if(!keepBottom)contentBottom=null;boundsTime=0;followUntil=performance.now()+3000;invalidateMobilePicture()}
 function mirrorTarget(){return popupActive()?'popup':'main'}
 // Copy a desktop rectangle from the mirror, clipped to what the mirror holds.
 function drawDesktop(context,x,y,width,height,dx,dy,dw,dh){
@@ -30,10 +43,31 @@ function drawDesktop(context,x,y,width,height,dx,dy,dw,dh){
 // the Retina viewport, and can continue while the next strips are decoding.
 function scrollGeometry(part,dpr){
   return JSON.stringify([box.id,box.conversation,view,mobilePaneRegion(box,view),panes.scale,dpr,
-    mobileCanvas.width,mobileCanvas.height,part.dx||0,part.dw,part.fillEdges,part.dy,part.width,part.height]);
+    mobileCanvas.width,mobileCanvas.height,part.dx||0,part.dw,part.fillEdges,part.reflowList,part.dy,part.width,part.height]);
+}
+function listTimestampRects(part){
+  const unit=box.uiScale||1,w=Math.ceil(part.width/unit),h=Math.ceil(part.height/unit);
+  if(w<100||w>600||h<1||h>4096)return [];
+  if(listLayoutCanvas.width!==w)listLayoutCanvas.width=w;
+  if(listLayoutCanvas.height!==h)listLayoutCanvas.height=h;
+  if(!drawDesktop(listLayoutContext,part.x,part.y,part.width,part.height,0,0,w,h))return [];
+  const pixels=listLayoutContext.getImageData(0,0,w,h).data,sx=part.width/w,sy=part.height/h;
+  return findListTimestamps(pixels,w,h).map(rect=>({x:part.x+rect.x*sx,y:part.y+rect.y*sy,width:rect.width*sx,height:rect.height*sy}));
 }
 function drawPaneSection(context,part,outputWidth,scale){
   const dx=part.dx||0,dw=part.dw||outputWidth,dh=part.height*scale;
+  if(part.reflowList){
+    const inset=part.edgeInset||4,trim=part.reflowList.trimRight;
+    drawDesktop(context,part.x+inset,part.y,1,part.height,0,part.dy,outputWidth,dh);
+    const drawn=drawDesktop(context,part.x,part.y,part.width-trim,part.height,dx,part.dy,(part.width-trim)*scale,dh);
+    if(!drawn)return false;
+    for(const rect of listTimestampRects(part)){
+      const y=part.dy+(rect.y-part.y)*scale,w=rect.width*scale,h=rect.height*scale;
+      drawDesktop(context,part.x+inset,rect.y,1,rect.height,dx+(rect.x-part.x)*scale,y,w,h);
+      drawDesktop(context,rect.x,rect.y,rect.width,rect.height,outputWidth-part.reflowList.rightInset*scale-w,y,w,h);
+    }
+    return true;
+  }
   if(part.fillEdges){
     // Extend each row's own background, including full-width selection. Text
     // and avatars retain their aspect ratio and exact native touch mapping.
@@ -69,8 +103,30 @@ function drawScrollBody(part,dpr){
   const limit=Math.min(8192,Math.floor(8*1024*1024/width));
   const captured=Math.min(height,Math.floor(limit/scale)),pixels=Math.ceil(captured*scale);
   if(width<1||pixels<1||captured+1e-6<part.height){if(scrollCache)releaseScrollCache();return false}
-  const key=JSON.stringify([mirror.epoch,mirror.version,mirror.key,mirror.rect,scrollGeometry(part,dpr)]);
+  const source=JSON.stringify([mirror.epoch,mirror.key,mirror.rect,scrollGeometry(part,dpr)]),key=source+':'+mirror.version;
   if(scrollCache?.key!==key||part.y<scrollCache.top-1e-6||part.y+part.height>scrollCache.top+scrollCache.height+1e-6){
+    const damage=mirror.damage;
+    if(scrollCache?.source===source&&scrollCache.version===damage?.from&&!damage.full&&!damage.moves&&!part.reflowList
+      &&part.y>=scrollCache.top&&part.y+part.height<=scrollCache.top+scrollCache.height){
+      // A header/cursor update must not resample a tall Retina message layer.
+      // Refresh only intersecting bands, with a halo for the scaling filter.
+      const bands=[];
+      for(const [y,h] of damage.rows){
+        const first=Math.max(scrollCache.top,mirror.rect[1]+y-2),last=Math.min(scrollCache.top+scrollCache.height,mirror.rect[1]+y+h+2);
+        if(last>first)bands.push([first,last]);
+      }
+      bands.sort((a,b)=>a[0]-b[0]);const merged=[];
+      for(const band of bands){const previous=merged.at(-1);if(previous&&band[0]<=previous[1])previous[1]=Math.max(previous[1],band[1]);else merged.push(band)}
+      if(merged.reduce((sum,[a,b])=>sum+b-a,0)<scrollCache.height*.5){
+        for(const [a,b] of merged){
+          const dy=(a-scrollCache.top)*scale;
+          scrollBodyContext.fillStyle='#f4f4f4';scrollBodyContext.fillRect(0,dy,width,(b-a)*scale);
+          drawPaneSection(scrollBodyContext,{...part,x:region.x,y:a,width:region.width,height:b-a,dy,dx:(part.dx||0)*dpr,dw:(part.dw||panes.width)*dpr},width,scale);
+        }
+        scrollCache.key=key;scrollCache.version=mirror.version;
+        return positionScrollBody(part,dpr);
+      }
+    }
     const origin=Math.max(top,Math.min(top+height-captured,part.y-(captured-part.height)/2));
     if(scrollBodyCanvas.width!==width)scrollBodyCanvas.width=width;
     if(scrollBodyCanvas.height!==pixels)scrollBodyCanvas.height=pixels;
@@ -78,7 +134,7 @@ function drawScrollBody(part,dpr){
     scrollBodyContext.fillStyle='#f4f4f4';scrollBodyContext.fillRect(0,0,width,pixels);
     const cached={...part,x:region.x,y:origin,width:region.width,height:captured,dy:0,dx:(part.dx||0)*dpr,dw:(part.dw||panes.width)*dpr};
     if(!drawPaneSection(scrollBodyContext,cached,width,scale))return false;
-    scrollCache={key,geometry:scrollGeometry(part,dpr),top:origin,height:captured};
+    scrollCache={key,source,version:mirror.version,geometry:scrollGeometry(part,dpr),top:origin,height:captured};
   }
   return positionScrollBody(part,dpr);
 }
@@ -89,7 +145,7 @@ function materializeMobilePicture(){
   pictureContext.setTransform(dpr,0,0,dpr,0,0);pictureContext.imageSmoothingQuality='low';
   pictureContext.drawImage(scrollBodyCanvas,0,sourceY,scrollBodyCanvas.width,rows,dx,dy/dpr,dw,rows/dpr);
 }
-function releaseScrollCache(){if(scrollClip)scrollClip.hidden=true;scrollCache=null;scrollBodyCanvas.width=1;scrollBodyCanvas.height=1}
+function releaseScrollCache(){if(scrollClip)scrollClip.hidden=true;scrollCache=null;scrollBodyCanvas.width=1;scrollBodyCanvas.height=1;listLayoutCanvas.width=1;listLayoutCanvas.height=1}
 // Publish only complete frames. Decode one strip at a time so Retina frames
 // do not retain another full desktop-sized set of bitmaps on the phone.
 async function applyMessage(header,bytes,valid=()=>true){
@@ -131,12 +187,16 @@ async function applyMessage(header,bytes,valid=()=>true){
     for(const picture of pending)picture.then(image=>image.close?.(),()=>{});
   }
   if(!valid())return;
-  if(header.strips.length||header.moves?.length){mirror.changed=performance.now();mirror.version++;renderDirty=true}
+  if(header.strips.length||header.moves?.length){
+    mirror.damage={from:mirror.version,full:!!header.full||header.key!==mirror.key,moves:!!header.moves?.length,rows:header.strips.map(([y,h])=>[y,h])};
+    mirror.changed=performance.now();mirror.version++;renderDirty=true;
+  }
   mirror.key=header.key;mirror.rect=header.rect;mirror.ready=true;
   if(header.layout)mirror.layout=header.layout;
   // Keep the complete old layer at its old origin during decode. Shift its
   // coordinates only when the corresponding new pixels are ready to publish.
   if(shifted)followShift(header.moves);
+  requestMobilePaint();
 }
 function movePictureRows(moves,width){
   // Same-direction scrolls can copy in place, starting at the far end. Canvas
@@ -204,8 +264,9 @@ async function socketMirror(){
     const watchdog=setInterval(()=>{
       if(!valid())return finish();
       if(performance.now()-last>(received?15000:5000))return finish(Error('画面连接超时'));
-      if(socket.readyState===1)socket.send('ping');
-    },3000);
+      // ACK traffic already renews the server lease. Ping only a quiet stream.
+      if(socket.readyState===1&&performance.now()-last>10000)socket.send('ping');
+    },5000);
     socket.onmessage=event=>{
       if(!valid())return finish();
       // The server may send one picture ahead; pictures are applied strictly in arrival order.
@@ -240,9 +301,10 @@ async function socketMirror(){
 }
 // When the home network becomes reachable, or the preference changes, move the stream without a visible reset.
 globalThis.addEventListener?.('nas-lan-change',()=>{if(mirror.mode==='websocket'&&mirror.socket&&!document.hidden&&view!=='full'){mirror.epoch++;mirror.socket.close()}});
-function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close();releaseScrollCache()}
+function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close();releaseScrollCache();suspendMobilePainting()}
 
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMirror()});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){mirror.retryAt=0;invalidateMobilePicture();wakeMirror()}});
 window.addEventListener('pagehide',releaseScrollCache);
 function decodeImage(blob,timeout=3000){
   // WebKit can leave a bitmap decode pending under memory pressure. Bound the
@@ -264,9 +326,14 @@ function decodeImage(blob,timeout=3000){
     else fallback();
   });
 }
+let mirrorWake=null;
+function wakeMirror(){const wake=mirrorWake;mirrorWake=null;wake?.()}
+function waitForMirror(){return new Promise(resolve=>{mirrorWake=resolve})}
 async function mirrorLoop(){
   for(;;){
-    if(document.hidden||view==='full'||!box){await new Promise(r=>setTimeout(r,300));continue}
+    // The first WS frame carries its own layout; connect in parallel with the
+    // HTTP preparation request instead of waiting for an extra round trip.
+    if(document.hidden||view==='full'||(!box&&mirror.mode==='poll')){await waitForMirror();continue}
     if(mirror.mode==='poll'&&performance.now()>mirror.retryAt){mirror.mode='websocket';transportStatus()}
     if(mirror.mode==='websocket'){
       try{await socketMirror()}catch{
@@ -298,7 +365,7 @@ async function mirrorLoop(){
 }
 // A different target (for example a menu that just opened) must not wait for the old long poll.
 function retargetMirror(){if(mirror.mode==='poll'&&mirror.controller&&mirror.target!==mirrorTarget()){mirror.target=null;mirror.controller.abort()}}
-function resetMirror(){stopMirror();mirror.key=null;mirror.since=-1;mirror.version=-1;mirror.mode='websocket';mirror.retryAt=0;renderDirty=true;transportStatus()}
+function resetMirror(){stopMirror();mirror.key=null;mirror.since=-1;mirror.version=-1;mirror.mode='websocket';mirror.retryAt=0;invalidateMobilePicture();wakeMirror();transportStatus()}
 function pictureHeader(){
   if(!box||!mirror.ready)return null;
   try{
@@ -342,7 +409,7 @@ function regionAverages(x,y,width,height,columns,rows,detail=8){
 }
 function rowSignature(y){const s=box?.uiScale||1;return box?regionAverages((box.panes?.list?.x??box.x+(box.split||104)+2)+8*s,y-30*s,90*s,60*s,6,6):null}
 function fitMobilePicture(){
-  renderDirty=true;
+  invalidateMobilePicture();wakeMirror();
   const popup=activePopup(),mode=popup?'popup':!box.chatReady?'window':view;
   if(lastPaneView!==mode){localOffset=0;contentBottom=null;boundsTime=0;lastPaneView=mode}
   if(popup||!box.chatReady){
@@ -397,7 +464,7 @@ function scrollLocal(delta){
   // canvas sizing work in the touch hot path; hit testing shares this origin.
   if(box.client==='qq'){
     panes.start=next;panes.sections.at(-1).y=next;
-    stage.dataset.panes=JSON.stringify(panes);renderDirty=true;
+    stage.dataset.panes=JSON.stringify(panes);invalidateMobilePicture();
   }else fitMobilePicture();
   return delta-(next-before)*panes.scale;
 }
@@ -439,7 +506,6 @@ function pictureLayoutMatches(){
   return true;
 }
 function paintMobile(now){
-  requestAnimationFrame(paintMobile);
   if(!box||view==='full'||document.hidden)return;
   if(typeof navigationAnimationRunning==='function'&&navigationAnimationRunning())return;
   const waiting=document.querySelector('#waiting');
@@ -471,9 +537,14 @@ function paintMobile(now){
       drawPaneSection(pictureContext,part,panes.width,part.scale||panes.scale);
     }
     renderDirty=false;paintedVersion=mirror.version;
+    // A burst may have reached us before the bounds sampling interval. Finish
+    // that one pending measurement without maintaining an idle animation loop.
+    if(now<followUntil&&boundsVersion!==mirror.version&&!boundsTimer&&view==='chat'){
+      boundsTimer=setTimeout(()=>{boundsTimer=0;invalidateMobilePicture()},Math.max(1,120-(now-boundsTime)));
+    }
     waiting.classList.add('hidden');
     if(typeof navigationPicturePainted==='function')navigationPicturePainted();
   }catch{}
 }
-requestAnimationFrame(paintMobile);
+requestMobilePaint();
 mirrorLoop();

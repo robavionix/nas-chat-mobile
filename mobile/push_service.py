@@ -1,4 +1,4 @@
-"""Opt-in Web Push from standard desktop notifications. No chat database or protocol access."""
+"""Opt-in Web Push from desktop notifications and recognised client message tones."""
 import asyncio
 import base64
 import hashlib
@@ -9,9 +9,12 @@ import re
 import secrets
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit
 from client_adapter import get_client
+from notification_audio import AudioNotifications
+from notification_preview import MessagePreview
 
 
 def public_origin(value):
@@ -70,6 +73,12 @@ class PushService:
         self.records, self.seen, self.test_times, self.test_reports = {}, {}, {}, {}
         self.origin, self.public_key, self.sender = None, None, sender
         self.source, self.last_event, self.last_delivery, self.last_error = 'disabled', 0, 0, ''
+        self.audio = None
+        self.preview_reader = None
+        self.last_content = 0
+        self.last_content_source = 'none'
+        self.preview_wait = .65
+        self.recent_sources = deque(maxlen=64)
         try:
             if origin is None:
                 settings = json.loads((self.root / 'settings.json').read_text())
@@ -128,8 +137,15 @@ class PushService:
 
     def status(self, owner):
         with self.lock:
+            audio = self.audio.state if self.audio else 'disabled'
             return {'available': self.enabled, 'publicKey': self.public_key,
-                    'source': self.source, 'lastEvent': self.last_event, 'lastDelivery': self.last_delivery,
+                    'source': 'connected' if audio == 'connected' else self.source,
+                    'sources': {'desktop': self.source, 'audio': audio},
+                    'contentSource': self.preview_reader.state if self.preview_reader else 'unavailable',
+                    'contentResult': self.preview_reader.last_result if self.preview_reader else 'unavailable',
+                    'lastContent': self.last_content,
+                    'lastContentSource': self.last_content_source,
+                    'lastEvent': self.last_event, 'lastDelivery': self.last_delivery,
                     'deliveryError': self.last_error,
                     'subscriptions': [{'id': identity, 'preview': bool(item.get('preview')), 'test': self.test_reports.get(identity)}
                                       for identity, item in self.records.items() if item['owner'] == owner and item['expires'] > self.clock()]}
@@ -163,18 +179,21 @@ class PushService:
             if self.enabled:
                 self.save()
 
-    def enqueue(self, identity, item, summary='', body='', test=False, ticket=None):
+    def enqueue(self, identity, item, summary='', body='', test=False, ticket=None, event=None):
         preview = bool(item.get('preview')) and not test
         payload = {'title': plain_text(summary, 100) if preview else ('推送测试' if test else '聊天 · 新消息'),
                    'body': plain_text(body, 400) if preview else ('通知已开启，可以关闭页面测试接收。' if test else '你有新的聊天消息，点击查看。'),
                    'url': '/mobile/?notifications=1', 'tag': 'nas-chat-test' if test else 'nas-chat-new-message'}
+        payload['_content_source'] = 'desktop' if preview and event and event['source'] == 'desktop' else 'generic'
+        if preview and event and event['source'] == 'audio':
+            payload['_event'] = event
         try:
             self.queue.put_nowait((identity, item['owner'], self.clock(), payload, ticket))
             return True
         except queue.Full:
             return False
 
-    def notify(self, summary, body, event_id):
+    def notify(self, summary, body, event_id, source='desktop'):
         with self.lock:
             now = self.clock()
             self.seen = {key: stamp for key, stamp in self.seen.items() if now - stamp < 60}
@@ -183,10 +202,23 @@ class PushService:
             self.seen[event_id] = now
             if len(self.seen) > 512:
                 self.seen.pop(next(iter(self.seen)))
+            # Some client versions emit both signals for the same incoming
+            # message. Coalesce only across sources, never distinct D-Bus IDs.
+            self.recent_sources = deque((event for event in self.recent_sources if now-event['created'] < 1.2), maxlen=64)
+            other = next((event for event in reversed(self.recent_sources) if event['source'] != source and not event['paired']), None)
+            if other:
+                other['paired'] = True
+                if source == 'desktop':
+                    other['rich'] = (summary, body)
+                    other['ready'].set()
+                return
+            event = {'source':source, 'created':now, 'stamp':time.monotonic(), 'paired':False,
+                     'rich':(summary,body) if source == 'desktop' else None, 'ready':threading.Event()}
+            self.recent_sources.append(event)
             self.last_event = now
             for identity, item in self.records.items():
                 if item['expires'] > now:
-                    self.enqueue(identity, item, summary, body)
+                    self.enqueue(identity, item, summary, body, event=event)
 
     def test(self, owner, identity):
         if not isinstance(identity, str):
@@ -212,13 +244,34 @@ class PushService:
 
     def deliver(self, job):
         identity, owner, created, payload, ticket = job
+        payload = dict(payload)
+        event = payload.pop('_event', None)
+        content_source = payload.pop('_content_source', 'generic')
         with self.lock:
             item = self.records.get(identity)
             if not item or item['owner'] != owner or item['expires'] <= self.clock() or self.clock() - created > 120:
                 return
             info = item['subscription']
+            preview = bool(item.get('preview'))
+        if event and preview:
+            event['ready'].wait(self.preview_wait)
+            content = event['rich']
+            if not content and self.preview_reader:
+                try: content = self.preview_reader.resolve(event['stamp'])
+                except Exception: content = None
+            content_source = 'desktop' if event['rich'] else 'screen-preview' if content else 'generic'
+            content = event['rich'] or content
+            if content:
+                payload.update(title=plain_text(content[0],100), body=plain_text(content[1],400))
+        # OCR can take time. Recheck revocation and the content switch before
+        # handing anything to a push provider; internal metadata never leaves.
+        with self.lock:
+            item = self.records.get(identity)
+            if not item or item['owner'] != owner or item['expires'] <= self.clock() or self.clock()-created > 120:
+                return
             if payload['tag'] == 'nas-chat-new-message' and not item.get('preview'):
                 payload = dict(payload, title='聊天 · 新消息', body='你有新的聊天消息，点击查看。')
+                content_source = 'generic'
         try:
             response = self.sender(subscription_info=info, data=json.dumps(payload, ensure_ascii=False),
                         vapid_private_key=str(self.keyfile), vapid_claims={'sub': self.origin},
@@ -226,6 +279,10 @@ class PushService:
             if response is not None and not 200 <= response.status_code < 300:
                 raise RuntimeError('Push service rejected delivery')
             self.last_delivery, self.last_error = self.clock(), ''
+            if payload['tag'] == 'nas-chat-new-message':
+                self.last_content_source = content_source
+            if payload['tag'] == 'nas-chat-new-message' and payload['title'] != '聊天 · 新消息':
+                self.last_content = self.clock()
             self.test_report(identity, owner, ticket, 'accepted')
         except Exception as error:
             response = getattr(error, 'response', None)
@@ -249,12 +306,28 @@ class PushService:
             finally:
                 self.queue.task_done()
 
-    def start(self):
+    def start(self, snapshot=None):
         if not self.enabled:
             return
+        if snapshot:
+            self.preview_reader = MessagePreview(snapshot, self.has_preview_subscribers)
+            self.preview_reader.start()
         for _ in range(2):
             threading.Thread(target=self.worker, daemon=True).start()
         threading.Thread(target=self.watch, daemon=True).start()
+        self.audio = AudioNotifications(self.client,
+            lambda: self.notify('聊天 · 新消息', '你有新的聊天消息，点击查看。',
+                                ('audio', time.monotonic_ns()), source='audio'),
+            self.has_subscribers)
+        self.audio.start()
+
+    def has_subscribers(self):
+        with self.lock:
+            return any(item['expires'] > self.clock() for item in self.records.values())
+
+    def has_preview_subscribers(self):
+        with self.lock:
+            return any(item.get('preview') and item['expires'] > self.clock() for item in self.records.values())
 
     def accepts_notification(self, app):
         return str(app).casefold() in self.client.notification_apps

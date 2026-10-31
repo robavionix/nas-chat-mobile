@@ -10,6 +10,7 @@
   const iphone=/iPhone|iPad|iPod/.test(navigator.userAgent)||navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1;
   const installed=window.matchMedia?.('(display-mode: standalone)').matches||navigator.standalone===true;
   const keyBytes=value=>Uint8Array.from(atob(value.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-value.length%4)%4)),c=>c.charCodeAt(0));
+  const sourceNotice=()=>active?.preview?(state.contentSource==='ready'?'已开启会话摘要预览。无法确认内容时仍会提醒有新消息。':'内容预览已开启，正在等待可读取的新消息摘要；暂时只提醒有新消息。'):'已开启消息提醒。通知内容预览已关闭。';
   async function subscriptionId(value){
     if(!value)return null;
     const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value.endpoint));
@@ -20,7 +21,7 @@
     preview.textContent='通知显示内容：'+(active?.preview?'开启':'关闭');preview.setAttribute('role','switch');preview.setAttribute('aria-checked',String(!!active?.preview));
     toggle.disabled=working||!supported||!state?.available||!registration||iphone&&!installed;
     preview.disabled=test.disabled=working||!active;
-    info.textContent=notice||(!supported?'当前浏览器不支持后台推送。':iphone&&!installed?'请先通过 Safari 分享菜单添加到主屏幕，再从主屏幕打开并开启推送。':!state?'正在检查推送…':!state.available?'外网推送尚未配置。':Notification.permission==='denied'?'通知权限已关闭，请在系统设置中允许通知后再开启。':active?(state.deliveryError||(state.source==='connected'?'已开启。锁屏或关闭页面后也可接收桌面聊天客户端发出的新消息通知。':'已开启，正在等待桌面聊天客户端通知源连接。')):'关闭时不会接收通知。开启后可发送测试通知；默认隐藏消息内容。');
+    info.textContent=notice||(!supported?'当前浏览器不支持后台推送。':iphone&&!installed?'请先通过 Safari 分享菜单添加到主屏幕，再从主屏幕打开并开启推送。':!state?'正在检查推送…':!state.available?'外网推送尚未配置。':Notification.permission==='denied'?'通知权限已关闭，请在系统设置中允许通知后再开启。':active?(state.deliveryError||(state.sources?.audio==='connected'?sourceNotice():state.source==='connected'?'已连接桌面通知；消息提醒识别暂不可用，未产生桌面通知的消息不会推送。':'已开启，正在等待桌面聊天客户端通知源连接。')):'关闭时不会接收通知。开启后可发送测试通知；默认隐藏消息内容。');
   }
   async function refresh(){
     if(!supported){render();return}
@@ -69,7 +70,7 @@
   });
   preview.addEventListener('click',async()=>{
     if(working||!active)return;working=true;revision++;notice='';render();
-    try{const value=!active.preview;await call('push/subscribe',{subscription:subscription.toJSON(),preview:value});active.preview=value;notice=value?'通知将显示发送者和消息内容。':'通知只显示新消息提醒。'}
+    try{const value=!active.preview;await call('push/subscribe',{subscription:subscription.toJSON(),preview:value});active.preview=value;notice=value?'已开启内容预览。优先使用桌面通知，否则在 NAS 本机识别新收到的会话摘要；无法确认时只提醒有新消息。':'通知只显示新消息提醒。'}
     catch(error){notice=error.message}finally{working=false;render()}
   });
   test.addEventListener('click',async()=>{

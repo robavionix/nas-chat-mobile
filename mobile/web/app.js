@@ -75,7 +75,7 @@ function reconnect(note){
   if(view==='full')frame.src='/index.html?reload='+Date.now();
   if(note)message(note);update(true);
 }
-async function tapRemote(p,button=1){
+async function tapRemote(p,button=1,clickCount=1){
   if(viewOnly||busy||navigating||!connected()||!box){debugLog('tap-dropped',{busy,navigating,connected:connected()});return}
   if(qqSearchTap(p,button)){openQQSearch();return}
   const popup=activePopup();
@@ -84,8 +84,9 @@ async function tapRemote(p,button=1){
   navigating=true;controls();message(button===3?'正在打开菜单…':'正在打开…');
   try{
     const data=popup?{target:'popup',window:popup.id,x:p.x,y:p.y,button}:{target:'main',window:box.id,conversation:box.conversation,x:p.x,y:p.y,button};
+    if(clickCount===2&&!popup)data.clickCount=2;
     if(!popup&&box.compactList&&button===1){const signature=rowSignature(p.y);if(signature)data.signature=signature}
-    debugLog('tap',{x:p.x,y:p.y,button,view,list:box.compactList,conversation:box.conversation,popup:popup?.kind,signature:!!data.signature});
+    debugLog('tap',{x:p.x,y:p.y,button,clickCount,view,list:box.compactList,conversation:box.conversation,popup:popup?.kind,signature:!!data.signature});
     const result=await call('tap',data);
     debugLog('tap-result',{list:result.layout.compactList,conversation:result.layout.conversation,navigation:result.navigation,popups:result.layout.popups.length});
     acceptLayout(result.layout);
@@ -184,6 +185,7 @@ function fit(){
   const full=view==='full';
   stage.classList.toggle('full',full);stage.classList.toggle('mobile-ready',!full);
   if(!full){
+    fullWaiting();
     if(frame.getAttribute('src')!=='about:blank')frame.src='about:blank';
     fitMobilePicture();return;
   }
@@ -203,12 +205,14 @@ function fit(){
   fullWaiting();
 }
 // The remote desktop can take several seconds to connect the first time.
+let fullWaitTimer=0;
 function fullWaiting(){
-  if(view!=='full')return;
+  clearTimeout(fullWaitTimer);fullWaitTimer=0;
+  if(view!=='full'||document.hidden)return;
   const waiting=document.querySelector('#waiting');
   waiting.textContent='正在连接完整桌面…';waiting.classList.toggle('hidden',connected());
+  fullWaitTimer=setTimeout(fullWaiting,connected()?5000:700);
 }
-setInterval(fullWaiting,700);
 // Zoom around a screen point, keeping the content under the fingers in place.
 function setZoom(value,clientX,clientY){
   const next=Math.max(1,Math.min(3,value));if(Math.abs(next-zoom)<.005||view==='full')return;
@@ -366,7 +370,10 @@ function uploadOne(file,id,target){
     request.onload=()=>{
       if(request.status===401){location.replace('/mobile/login');return reject(Error('请重新登录'))}
       let result={};try{result=JSON.parse(request.responseText)}catch{}
-      if(request.status>=200&&request.status<300)resolve(result);else{const error=Error(result.error||(request.status===413?'文件太大，单个不能超过 95MB':'发送失败'));error.layout=result.layout;reject(error)}
+      if(request.status>=200&&request.status<300)resolve(result);else{
+        const limitError=request.status===413?(file.size>95*1024*1024?'单个文件不能超过 95MB':'上传被服务器代理限制拦截，文件实际为 '+(file.size/1048576).toFixed(2)+' MB，请刷新后重试'):'';
+        const error=Error(result.error||limitError||'发送失败');error.layout=result.layout;reject(error);
+      }
     };
     request.onerror=()=>reject(Error('上传中断，请稍后重试'));request.send(file);
   });
@@ -398,13 +405,19 @@ document.querySelector('#logout').onclick=async()=>{try{await call('logout',{});
 document.querySelector('#logout-all').onclick=async()=>{if(!confirm('所有已登录的手机和电脑都需要重新输入密码，确定吗？'))return;try{await call('logout-all',{});location.replace('/mobile/login')}catch(e){message(e.message,true)}};
 window.visualViewport?.addEventListener('resize',viewport);window.visualViewport?.addEventListener('scroll',viewport);
 window.addEventListener('resize',viewport);window.addEventListener('orientationchange',()=>{baselineHeight=window.visualViewport?.height||innerHeight;viewport()});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)update(true)});
+document.addEventListener('visibilitychange',()=>{fullWaiting();if(!document.hidden)update(true)});
+window.addEventListener('pagehide',()=>{clearTimeout(fullWaitTimer);fullWaitTimer=0});
 new ResizeObserver(()=>{fit();scheduleAdapt()}).observe(screen);
 frame.addEventListener('load',()=>{if(view==='full')setTimeout(()=>{fit();update(true)},1000)});
 // render.js and touch.js load after this file; start once every script is in place.
-document.addEventListener('DOMContentLoaded',()=>{setInterval(()=>{if(!document.hidden)update()},8000);viewport();controls();update()});
+function periodicLayoutUpdate(){
+  // A healthy WS already publishes layout changes. Keep HTTP checks for the
+  // compatible/full view, startup and recovery instead of duplicating traffic.
+  if(!document.hidden&&(view==='full'||typeof mirror==='undefined'||mirror.mode!=='websocket'||!connected()||!box||transientError))update();
+}
+document.addEventListener('DOMContentLoaded',()=>{setInterval(periodicLayoutUpdate,15000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
-const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.6.2',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
+const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.6.3',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
 
 // Optional LAN configuration is generated on the deployment host, never baked into the bundle.
 fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{
