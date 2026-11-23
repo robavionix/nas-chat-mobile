@@ -31,12 +31,12 @@ const lanSource=fs.readFileSync('mobile/web/lan.js','utf8');
 function lan({host='chat.example',config={url:'https://192.168.1.10:5843/mobile/'},reachable=true,pref=null}){
   const events=[],store={};if(pref)store['nas-chat-lan']=pref;const listeners={};
   const fetch=async(url,options={})=>{
-    if(url==='/mobile/lan-config.json')return {json:async()=>config};
+    if(url==='/mobile/lan-config.json')return {ok:true,json:async()=>config};
     if(url.startsWith('https://192.168.1.10:5843/mobile/manifest.json')){assert.equal(options.mode,'no-cors');if(!reachable)throw TypeError('unreachable');return {}}
     if(url==='/mobile-api/stream-token'){assert.equal(options.headers['X-Mobile-Control'],'1');return {ok:true,json:async()=>({token:'t1'})}}
     throw Error('unexpected '+url);
   };
-  const context={location:{hostname:host},fetch,AbortSignal:{timeout:()=>undefined},URL,Date,Event:class{constructor(type){this.type=type}},
+  const context={AbortController,clearTimeout,setTimeout:(f,ms)=>setTimeout(f,ms).unref(),navigator:{onLine:true},location:{hostname:host},fetch,AbortSignal:{timeout:()=>undefined},URL,Date,Event:class{constructor(type){this.type=type}},
     localStorage:{getItem:key=>store[key]??null,setItem:(key,value)=>{store[key]=value}},
     document:{hidden:false,addEventListener(type,fn){listeners[type]=fn},querySelector:()=>null},
     addEventListener(){},dispatchEvent:event=>events.push(event.type)};

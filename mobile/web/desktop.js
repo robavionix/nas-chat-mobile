@@ -106,9 +106,10 @@
       for (const [index, [top, height, , left = 0, width = mirror.width]] of header.strips.entries()) {
         if (!valid()) return;
         const image = await pictures[index]; pictures[index] = null;
-        try { mctx.drawImage(image, left, top, width, height); } finally { image.close?.(); }
+        try { if (!valid()) return; mctx.drawImage(image, left, top, width, height); } finally { image.close?.(); }
       }
     } finally { for (const picture of pictures) picture?.then(image => image.close?.(), () => {}); }
+    if (!valid()) return;
     key = header.key; rect = header.rect; size = header.size || header.rect.slice(2); unit = header.scale || 1;
     $('#waiting').hidden = true;
     schedulePaint();
@@ -124,29 +125,29 @@
       '/mobile-api/ws?quality=' + (lan ? 'lossless' : QUALITY) + '&pipeline=2&layout=desktop&aspect=' + aspect +
       (lan ? '&token=' + encodeURIComponent(lan.token) : ''));
     ws.binaryType = 'arraybuffer'; socket = ws;
-    let queue = Promise.resolve(), queued = 0, last = performance.now(), closed = false;
+    let queue = Promise.resolve(), queued = 0, last = performance.now(), closed = false, received = false;
     const current = () => !closed && my === epoch && !document.hidden;
     const watchdog = setInterval(() => {
       if (!current()) return finish();
       const idle = performance.now() - last;
-      if (idle > (key ? 15000 : 8000)) return finish('画面连接超时，正在重连…');
+      if (idle > (received ? 15000 : lan ? 4000 : 10000)) return finish('画面连接超时，正在重连…');
       if (ws.readyState === 1 && idle > 10000) ws.send('ping');
-    }, 5000);
+    }, 1000);
     function finish(error) {
       if (closed) return;
       closed = true; clearInterval(watchdog);
       try { ws.close(); } catch {}
       if (socket === ws) socket = null;
-      setStatus(false);
       if (my !== epoch || document.hidden) return;
+      setStatus(false);
       // A failed home-network stream falls back to the public address straight away.
       if (lan) { globalThis.nasLan.failed(); usingLan = false; error = null; retry = 0; }
       if (error) message(error, true);
       retry = Math.min(retry + 1, 6);
       if (retry >= 3) call('layout').then(r => acceptLayout(r.layout)).catch(() => {});
-      setTimeout(() => { if (my === epoch) connect(); }, 500 * retry);
+      setTimeout(() => { if (my === epoch) connect(); }, lan ? 0 : Math.min(8000, 350 * 2 ** (retry - 1)));
     }
-    ws.onopen = () => { retry = 0; };
+
     ws.onmessage = event => {
       if (!current()) return finish();
       // The server may send one picture ahead; pictures are applied strictly in arrival order.
@@ -163,6 +164,7 @@
         const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 8, hl)));
         await apply(header, new Uint8Array(buffer, 8 + hl, bl), current);
         if (!current()) return finish();
+        if (!received) { received = true; retry = 0; if (lan) globalThis.nasLan?.connected?.(); }
         last = performance.now(); setStatus(true);
         await new Promise(requestAnimationFrame);
         if (current() && ws.readyState === 1) ws.send('ack ' + header.seq);
@@ -214,7 +216,7 @@
   // Sending uses the checked send action; each chat keeps its own draft.
   const drafts = new Map();
   let typing = null, draftChat = null, inputScan = {key: '', at: 0, value: null}, syncBack = false, busySync = false;
-  function controls() { attach.disabled = busy; draft.readOnly = busy; }
+  function controls() { attach.disabled = busy; draft.readOnly = false; }
   function pixelRows(x, y0, y1) {
     // One picture column as luminance values, screen rows y0..y1 (top to bottom).
     const px = Math.round((x - rect[0]) / unit), top = Math.round((y0 - rect[1]) / unit), height = Math.round((y1 - y0) / unit);
@@ -322,6 +324,7 @@
   const failed = new Map();
   let sendChain = Promise.resolve();
   function sendDraft() {
+    if (busy) return message('文件正在发送，可以先打字，稍后再发');
     const text = draft.value;
     if (!text.trim()) return;
     if (!box?.conversation) return message('请先在左侧选择聊天', true);
@@ -525,24 +528,37 @@
     } catch (error) { if (error.layout) acceptLayout(error.layout); message(error.message, true); }
     finally { busy = false; controls(); }
   };
-  function uploadOne(file, id, job, progress) {
+  async function uploadOne(file, id, job, progress) {
+    // Read the selected file before WebKit hands the upload to its network process.
+    const bytes = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      const timer = setTimeout(() => reader.abort(), 30000);
+      reader.onloadend = () => clearTimeout(timer);
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reader.onabort = () => reject(Error('读取图片或文件失败，请重新选择本机文件'));
+      reader.readAsArrayBuffer(file);
+    });
     return new Promise((resolve, reject) => {
       const request = new XMLHttpRequest();
       request.open('POST', '/mobile-api/upload');
       request.setRequestHeader('X-Mobile-Control', '1'); request.setRequestHeader('Content-Type', 'application/octet-stream');
       request.setRequestHeader('X-File-Name', encodeURIComponent(file.name)); request.setRequestHeader('X-Request-Id', id);
       request.setRequestHeader('X-Window', job.window); request.setRequestHeader('X-Conversation', encodeURIComponent(job.conversation));
-      request.timeout = 120000;
-      request.ontimeout = () => reject(Error('上传超时，请检查聊天记录后再试'));
-      request.upload.onprogress = e => { if (e.lengthComputable) progress(e.loaded / e.total); };
+      let idle;
+      const arm = ms => { clearTimeout(idle); idle = setTimeout(() => request.abort(), ms); };
+      request.onabort = () => reject(Error('上传长时间没有进展，请先核对聊天记录'));
+      request.onloadend = () => clearTimeout(idle);
+      request.upload.onload = () => arm(120000);
+      arm(30000);
+      request.upload.onprogress = e => { arm(30000);  if (e.lengthComputable) progress(e.loaded / e.total); };
       request.onload = () => {
         if (request.status === 401) { location.replace('/mobile/login'); return reject(Error('请重新登录')); }
         let result = {}; try { result = JSON.parse(request.responseText); } catch {}
-        if (request.status >= 200 && request.status < 300) resolve(result);
+        if (request.status >= 200 && request.status < 300 && result.ok === true) resolve(result);
         else { const error = Error(result.error || '发送失败'); error.layout = result.layout; reject(error); }
       };
       request.onerror = () => reject(Error('上传中断，请稍后重试'));
-      request.send(file);
+      request.send(bytes);
     });
   }
 
@@ -565,5 +581,6 @@
   draft.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== draft) scrollTo(0, 0); }, 50));
   document.addEventListener('visibilitychange', () => { if (document.hidden) { epoch++; socket?.close(); socket = null; } else connect(); });
   controls(); setStatus(false); schedulePaint();
-  call('layout').then(r => acceptLayout(r.layout)).catch(() => {}).finally(connect);
+  connect();
+  call('layout').then(r => { if (!box) acceptLayout(r.layout); }).catch(() => {});
 })();

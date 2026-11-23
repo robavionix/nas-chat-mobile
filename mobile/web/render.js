@@ -258,15 +258,15 @@ async function socketMirror(){
       if(settled)return;settled=true;clearInterval(watchdog);
       if(mirror.socket===socket)mirror.socket=null;
       // A failed home-network stream falls back to the public address straight away.
-      if(lan&&error){globalThis.nasLan.failed();mirror.lan=false;error=null}
-      socket.close();error?reject(error):resolve();
+      if(lan&&error&&epoch===mirror.epoch&&!document.hidden){globalThis.nasLan.failed();mirror.lan=false;error=null}
+      socket.close();error&&epoch===mirror.epoch&&!document.hidden?reject(error):resolve();
     }
     const watchdog=setInterval(()=>{
       if(!valid())return finish();
-      if(performance.now()-last>(received?15000:5000))return finish(Error('画面连接超时'));
+      if(performance.now()-last>(received?15000:lan?4000:10000))return finish(Error('画面连接超时'));
       // ACK traffic already renews the server lease. Ping only a quiet stream.
       if(socket.readyState===1&&performance.now()-last>10000)socket.send('ping');
-    },5000);
+    },1000);
     socket.onmessage=event=>{
       if(!valid())return finish();
       // The server may send one picture ahead; pictures are applied strictly in arrival order.
@@ -288,7 +288,7 @@ async function socketMirror(){
         if(!valid())return finish();
         mirror.alive=last=performance.now();mirror.streamed=true;
         mirror.frames++;mirror.bytes+=buffer.byteLength;
-        if(!received)transportStatus();
+        if(!received){transportStatus();if(lan)globalThis.nasLan?.connected?.()}
         received=true;mirror.failures=0;
         controls();
         await new Promise(requestAnimationFrame);
@@ -300,7 +300,7 @@ async function socketMirror(){
   });
 }
 // When the home network becomes reachable, or the preference changes, move the stream without a visible reset.
-globalThis.addEventListener?.('nas-lan-change',()=>{if(mirror.mode==='websocket'&&mirror.socket&&!document.hidden&&view!=='full'){mirror.epoch++;mirror.socket.close()}});
+globalThis.addEventListener?.('nas-lan-change',()=>{if(document.hidden||view==='full')return;if(mirror.mode==='poll'){resetMirror();return}if(mirror.socket){mirror.epoch++;mirror.socket.close()}});
 function stopMirror(){mirror.epoch++;mirror.controller?.abort();mirror.socket?.close();releaseScrollCache();suspendMobilePainting()}
 
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMirror()});

@@ -357,25 +357,38 @@ draft.addEventListener('paste',event=>{
 });
 draft.placeholder='输入消息，也可长按粘贴图片';
 document.querySelector('#upload-cancel').onclick=()=>{pendingUpload=null;document.querySelector('#sheet').classList.remove('open')};
-function uploadOne(file,id,target){
-  return new Promise((resolve,reject)=>{
+async function uploadOne(file,id,target){
+  // Read the selected file before WebKit hands the upload to its network process.
+    const bytes = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      const timer = setTimeout(() => reader.abort(), 30000);
+      reader.onloadend = () => clearTimeout(timer);
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reader.onabort = () => reject(Error('读取图片或文件失败，请重新选择本机文件'));
+      reader.readAsArrayBuffer(file);
+    });
+    return new Promise((resolve,reject)=>{
     const request=new XMLHttpRequest();
     request.open('POST','/mobile-api/upload');
     request.setRequestHeader('X-Mobile-Control','1');request.setRequestHeader('Content-Type','application/octet-stream');
     request.setRequestHeader('X-File-Name',encodeURIComponent(file.name));request.setRequestHeader('X-Request-Id',id);
     request.setRequestHeader('X-Window',target.window);request.setRequestHeader('X-Conversation',encodeURIComponent(target.conversation));
-    request.timeout=120000;
-    request.ontimeout=()=>reject(Error('上传超时，请检查聊天记录后再试'));
-    request.upload.onprogress=e=>{if(e.lengthComputable)target.progress(e.loaded/e.total)};
+    let idle;
+      const arm = ms => { clearTimeout(idle); idle = setTimeout(() => request.abort(), ms); };
+      request.onabort = () => reject(Error('上传长时间没有进展，请先核对聊天记录'));
+      request.onloadend = () => clearTimeout(idle);
+      request.upload.onload = () => arm(120000);
+      arm(30000);
+      request.upload.onprogress=e=>{ arm(30000); if(e.lengthComputable)target.progress(e.loaded/e.total)};
     request.onload=()=>{
       if(request.status===401){location.replace('/mobile/login');return reject(Error('请重新登录'))}
       let result={};try{result=JSON.parse(request.responseText)}catch{}
-      if(request.status>=200&&request.status<300)resolve(result);else{
+      if(request.status>=200&&request.status<300 && result.ok === true)resolve(result);else{
         const limitError=request.status===413?(file.size>95*1024*1024?'单个文件不能超过 95MB':'上传被服务器代理限制拦截，文件实际为 '+(file.size/1048576).toFixed(2)+' MB，请刷新后重试'):'';
         const error=Error(result.error||limitError||'发送失败');error.layout=result.layout;reject(error);
       }
     };
-    request.onerror=()=>reject(Error('上传中断，请稍后重试'));request.send(file);
+    request.onerror=()=>reject(Error('上传中断，请稍后重试'));request.send(bytes);
   });
 }
 document.querySelector('#upload').onclick=async()=>{
@@ -417,7 +430,7 @@ function periodicLayoutUpdate(){
 }
 document.addEventListener('DOMContentLoaded',()=>{setInterval(periodicLayoutUpdate,15000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
-const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.6.3',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
+const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.6.4',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
 
 // Optional LAN configuration is generated on the deployment host, never baked into the bundle.
 fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{

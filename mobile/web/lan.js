@@ -1,61 +1,83 @@
-// Prefer the home network for the picture stream when this device can reach the NAS directly.
-// The page stays on the public address (same login, home-screen app and notifications); only the
-// picture WebSocket goes to the LAN entry, authorised by a short-lived stream token. The LAN entry
-// uses the NAS's own certificate, so this works on devices that trust it and quietly does nothing elsewhere.
+// Keep login and controls on the page origin. Only the picture stream can take the LAN route.
 (() => {
-  const PRIVATE = /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
   const KEY = 'nas-chat-lan';
-  let origin = null, reachable = null, checked = 0, probing = null, failedUntil = 0, using = false;
-  const onLan = PRIVATE.test(location.hostname);
+  function privateAddress(host) {
+    const octets = host.split('.');
+    if (octets.length !== 4 || !octets.every(x => /^\d{1,3}$/.test(x) && Number(x) <= 255)) return false;
+    const [a, b] = octets.map(Number);
+    return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  }
+  const onLan = privateAddress(location.hostname);
+  let origin, candidate, expires = 0, using = false, generation = 0;
+  let job = null, timer = 0, failures = 0, retryAt = 0;
   function enabled() { try { return localStorage.getItem(KEY) !== 'off'; } catch { return true; } }
-  async function lanOrigin() {
-    if (origin !== null) return origin;
-    try {
-      const response = await fetch('/mobile/lan-config.json', {cache: 'no-store'});
-      const url = new URL((await response.json()).url);
-      origin = url.protocol === 'https:' && PRIVATE.test(url.hostname) ? url.origin : '';
-    } catch { origin = ''; }
-    return origin;
+  function available() { return !onLan && enabled() && !document.hidden && navigator.onLine !== false; }
+
+  function schedule(delay) {
+    clearTimeout(timer);
+    if (available() && !using) timer = setTimeout(prepare, delay);
   }
-  // Runs in the background, so a page away from home never waits for it.
-  function probe() {
-    if (probing) return probing;
-    probing = (async () => {
-      const target = await lanOrigin();
-      let ok = false;
-      if (target) {
-        try {
-          await fetch(target + '/mobile/manifest.json?probe=' + Date.now(), {mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(1500)});
-          ok = true;
-        } catch {}
+  async function prepare() {
+    if (!available() || using || job) return;
+    if (Date.now() < retryAt) { schedule(retryAt - Date.now()); return; }
+    const version = generation;
+    const controller = new AbortController();
+    job = controller;
+    const timeout = setTimeout(() => controller.abort(), 4500);
+    try {
+      if (!origin) {
+        const r = await fetch('/mobile/lan-config.json', {cache: 'no-store', signal: controller.signal});
+        if (!r.ok) throw Error('config');
+        const url = new URL((await r.json()).url);
+        if (url.protocol !== 'https:' || !privateAddress(url.hostname) || url.username || url.password) throw Error('origin');
+        if (generation !== version) return;
+        origin = url.origin;
       }
-      reachable = ok; checked = Date.now(); probing = null;
-      if (ok && !using && enabled() && Date.now() >= failedUntil) dispatchEvent(new Event('nas-lan-change'));
-      return ok;
-    })();
-    return probing;
-  }
-  // Resolves to {base, token} for a LAN stream, or null to use the public address now.
-  async function stream() {
-    using = false;
-    if (onLan || !enabled() || Date.now() < failedUntil) return null;
-    if (reachable !== true) { if (reachable === null || Date.now() - checked > 60000) probe(); return null; }
-    if (Date.now() - checked > 60000) probe();
-    try {
-      const response = await fetch('/mobile-api/stream-token', {method: 'POST', cache: 'no-store', signal: AbortSignal.timeout(6000),
+      await fetch(origin + '/mobile/manifest.json', {mode: 'no-cors', credentials: 'omit', cache: 'no-store', signal: controller.signal});
+      if (generation !== version || !available()) return;
+      const r = await fetch('/mobile-api/stream-token', {method: 'POST', cache: 'no-store', signal: controller.signal,
         headers: {'Content-Type': 'application/json', 'X-Mobile-Control': '1'}, body: '{}'});
-      if (!response.ok) return null;
-      const {token} = await response.json();
-      if (!token) return null;
-      using = true;
-      return {base: origin.replace(/^https:/, 'wss:'), token};
-    } catch { return null; }
+      if (!r.ok) throw Error('token');
+      const {token} = await r.json();
+      if (typeof token !== 'string' || !token || generation !== version || !available()) return;
+      candidate = {base: origin.replace(/^https:/, 'wss:'), token};
+      expires = Date.now() + 60000;
+      dispatchEvent(new Event('nas-lan-change'));
+    } catch { /* The public stream continues during discovery. */ }
+    finally {
+      clearTimeout(timeout);
+      if (job === controller) {
+        job = null;
+        if (!using) {
+          retryAt = Date.now() + 45000;
+          schedule(45000);
+        }
+      }
+    }
   }
-  function failed() { using = false; reachable = null; failedUntil = Date.now() + 60000; }
-  function reset() { reachable = null; failedUntil = 0; }
-  addEventListener('online', reset);
-  // The network may have changed while the page was in the background.
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) reachable = null; });
+  function stream() {
+    if (available() && candidate && Date.now() < expires) {
+      using = true; clearTimeout(timer);
+      return candidate;
+    }
+    using = false;
+    if (available()) schedule(Math.max(0, retryAt - Date.now()));
+    return null;
+  }
+  function reset() {
+    generation++; job?.abort(); job = null; clearTimeout(timer);
+    candidate = null; using = false; retryAt = 0; failures = 0;
+  }
+  function failed() {
+    candidate = null; using = false;
+    const delay = Math.min(180000, 15000 * 2 ** Math.min(failures++, 4));
+    retryAt = Date.now() + delay;
+    schedule(delay);
+  }
+  function networkChange() { reset(); schedule(0); }
+  addEventListener('offline', reset);
+  addEventListener('online', networkChange);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) reset(); else schedule(0); });
   function label(button) {
     button.textContent = onLan ? '已在家里直连' : '优先家里直连：' + (enabled() ? '开' : '关');
     button.disabled = onLan;
@@ -66,9 +88,10 @@
     label(button);
     button.addEventListener('click', () => {
       try { localStorage.setItem(KEY, enabled() ? 'off' : 'on'); } catch {}
-      reset(); label(button);
-      dispatchEvent(new Event('nas-lan-change'));
+      const wasUsing = using;
+      networkChange(); label(button);
+      if (wasUsing && !enabled()) dispatchEvent(new Event('nas-lan-change'));
     });
   });
-  window.nasLan = {stream, failed, reset, enabled, active: () => using};
+  window.nasLan = {stream, failed, reset, enabled, active: () => using, connected: () => { failures = 0; }};
 })();

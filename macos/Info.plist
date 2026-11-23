@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>NAS 聊天</string>
+	<key>CFBundleExecutable</key>
+	<string>NASChat</string>
+	<key>CFBundleIconFile</key>
+	<string>Chat</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.robavionix.NASChat</string>
+	<key>CFBundleName</key>
+	<string>NAS 聊天</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.social-networking</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>在家时直接连接你的 NAS，显示微信和 QQ 的实时画面。</string>
+</dict>
+</plist>

@@ -27,14 +27,18 @@ vm.runInNewContext(loop,loopContext);
   assert.equal(sockets,1,'startup WS connects before the HTTP layout is ready');assert.equal(waits,1);
   const handlers={},requests=[];
   const file={name:'small.jpg',size:1048576};
-  const upload={XMLHttpRequest:class{
+  const bytes=new ArrayBuffer(file.size);
+  const upload={setTimeout,clearTimeout,FileReader:class{
+    readAsArrayBuffer(selected){assert.equal(selected,file);this.result=bytes;this.onload();this.onloadend()}
+  },XMLHttpRequest:class{
     constructor(){handlers.request=this;this.upload={}}open(){}setRequestHeader(){}send(value){requests.push(value)}
   },Error,JSON,encodeURIComponent,location:{replace(){}}};
   const app=fs.readFileSync('mobile/web/app.js','utf8');
-  vm.runInNewContext(app.slice(app.indexOf('function uploadOne('),app.indexOf("document.querySelector('#upload').onclick=")),upload);
+  vm.runInNewContext(app.slice(app.indexOf('async function uploadOne('),app.indexOf("document.querySelector('#upload').onclick=")),upload);
   const result=upload.uploadOne(file,'test-id',{window:'1',conversation:'a',progress(){}});
-  handlers.request.status=413;handlers.request.responseText='<html>nginx</html>';handlers.request.onload();
+  await Promise.resolve();await new Promise(setImmediate);
+  handlers.request.status=413;handlers.request.responseText='<html>nginx</html>';handlers.request.onload();handlers.request.onloadend();
   await assert.rejects(result,error=>error.message.includes('1.00 MB')&&!error.message.includes('不能超过 95MB'));
-  assert.equal(requests[0],file,'upload sends the original binary; no base64 expansion');
+  assert.equal(requests[0],bytes,'WebKit uploads the bytes read from the selected file');
   console.log('PASS demand-driven idle painting, burst coalescing, background/full view, parallel startup and accurate small-file proxy errors');
 })().catch(error=>{console.error(error);process.exitCode=1});

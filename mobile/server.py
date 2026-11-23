@@ -83,6 +83,8 @@ _x.XDefaultRootWindow.argtypes = [_vp]; _x.XDefaultRootWindow.restype = _ul
 _x.XDisplayWidth.argtypes = _x.XDisplayHeight.argtypes = [_vp, _int]
 _x.XQueryTree.argtypes = [_vp, _ul, ctypes.POINTER(_ul), ctypes.POINTER(_ul), ctypes.POINTER(ctypes.POINTER(_ul)), ctypes.POINTER(ctypes.c_uint)]
 _x.XGetWindowAttributes.argtypes = [_vp, _ul, ctypes.POINTER(_Attrs)]
+_x.XGetSelectionOwner.argtypes = [_vp, _ul]
+_x.XGetSelectionOwner.restype = _ul
 _x.XInternAtom.argtypes = [_vp, ctypes.c_char_p, _int]; _x.XInternAtom.restype = _ul
 _x.XGetAtomName.argtypes = [_vp, _ul]; _x.XGetAtomName.restype = _vp
 _x.XGetWindowProperty.argtypes = [_vp, _ul, _ul, ctypes.c_long, ctypes.c_long, _int, _ul, ctypes.POINTER(_ul),
@@ -804,28 +806,67 @@ def input_point(current):
     return current.get('inputPoint') or [current['x'] + current['width'] * .65, current['y'] + current['height'] - 165]
 
 
-def set_clipboard(content, kind=None):
+def set_clipboard(content, kind=None, selection="clipboard"):
     # xclip forks to retain clipboard ownership; its output must not be captured.
-    command = ['xclip', '-selection', 'clipboard'] + (['-t', kind] if kind else [])
+    command = ['xclip', '-selection', selection] + (['-t', kind] if kind else [])
     subprocess.run(command, input=content.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4, check=True)
 
 
-def clipboard_text():
+def clipboard_text(selection="clipboard"):
     try:
-        result = subprocess.run(['xclip', '-o', '-selection', 'clipboard'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2)
+        result = subprocess.run(['xclip', '-o', '-selection', selection], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2)
     except subprocess.TimeoutExpired:
         return None
     return result.stdout.decode(errors='replace') if result.returncode == 0 else None
 
 
+def clipboard_owner():
+    with X() as display:
+        return _x.XGetSelectionOwner(display.d, display.atom('CLIPBOARD'))
+
+
+def paste_verified(current, content):
+    # Keep the text available while the native app processes Ctrl+V.
+    set_clipboard(content)
+    if current.get('client') == 'qq':
+        run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')
+        deadline = time.monotonic() + 1.5
+        while input_content(current, False) != content:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(.04)
+        return True
+    original = clipboard_owner()
+    if not original:
+        return False
+    run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')
+    deadline = time.monotonic() + 2.5
+    while time.monotonic() < deadline:
+        time.sleep(.10)
+        if run('xdotool', 'getwindowfocus') != current['id']:
+            return False
+        run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+c')
+        # Reading our paste source would falsely confirm an empty editor.
+        for _ in range(6):
+            owner = clipboard_owner()
+            if owner and owner != original and clipboard_text() == content:
+                # Confirm against a fresh editor selection, independently of any
+                # clipboard manager that may have mirrored the original text.
+                return input_content(current, False) == content
+            time.sleep(.025)
+    return False
+
+
 def input_content(current, activate=True):
     """Return the text in WeChat's input box, '' when empty, or None when it holds something that is not text."""
     probe = 'NAS_INPUT_CHECK_' + secrets.token_hex(12)
-    set_clipboard(probe)
+    selection = "primary" if current.get("client") == "qq" else "clipboard"
+    set_clipboard(probe, selection=selection)
     native_click(current, *input_point(current), activate=activate)
-    run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+c')
+    keys = ('ctrl+a',) if selection == 'primary' else ('ctrl+a', 'ctrl+c')
+    run('xdotool', 'key', '--clearmodifiers', *keys)
     time.sleep(.12)
-    value = clipboard_text()
+    value = clipboard_text(selection)
     return '' if value == probe else value
 
 
@@ -1488,7 +1529,7 @@ class Handler(BaseHTTPRequestHandler):
                 refinement_delay = max(.3, min(1.2, latency()))
                 refining = phone is not None and any(
                     low and now-stamp > refinement_delay for low, stamp in zip(phone.low, phone.stamp))
-                if key is not None and snapshot == shown_layout and not damaged and not refining:
+                if key is not None and snapshot == shown_layout and not damaged and not refining and now - last_send < 5:
                     time.sleep(.04 if now - last_change < 1.5 else .1)
                     continue
                 header, blobs = {}, []
@@ -1743,9 +1784,7 @@ class Handler(BaseHTTPRequestHandler):
         native_click(current, *input_point(current))
         if run('xdotool', 'getwindowfocus') != current['id']:
             return self.reply(409, error='聊天客户端焦点已变化，请重试')
-        set_clipboard(content)
-        run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'ctrl+v')
-        if input_content(current, False) != content:
+        if not paste_verified(current, content):
             return self.reply(409, error='聊天客户端输入未完成，内容已保留，请再点发送')
         if not validated_chat(layout(), payload):
             return self.reply(409, error='聊天对象已变化，未发送，请重新选择会话')
