@@ -142,6 +142,13 @@ if '# mobile-ws-token-v1' not in s:
     s=s.replace('  location = /mobile-api/ws {\n','  location = /mobile-api/ws {\n    # mobile-ws-token-v1\n    auth_request off;\n')
     p.write_text(s)
 
+# mobile-upload-token-v1: uploads authenticate themselves (session cookie, or a short upload token
+# from the home-network entry), so a page opened at the public address can upload over the LAN.
+s=p.read_text()
+if '# mobile-upload-token-v1' not in s:
+    s=s.replace('  location = /mobile-api/upload {\n','  location = /mobile-api/upload {\n    # mobile-upload-token-v1\n    auth_request off;\n')
+    p.write_text(s)
+
 PY
 mkdir -p /run/wechat-mobile-service
 cp /custom-services.d/mobile/run /run/wechat-mobile-service/run

@@ -369,10 +369,57 @@
     });
   }
   view.addEventListener('mousedown', e => { if (e.button === 0) e.preventDefault(); });
+  // mouse-drag-v1: holding the left button and moving drags on the client (scrollbars, sliders, selecting
+  // text). Moves are coalesced so only the newest position waits while one request is on its way.
+  let mouseDrag = null, dragChain = Promise.resolve(), dragJustEnded = false;
+  function dragSend(d, action, p) {
+    d.last = p;
+    if (action === 'move') { d.next = p; if (d.moveQueued) return; d.moveQueued = true; }
+    dragChain = dragChain.then(async () => {
+      if (action === 'move') { d.moveQueued = false; p = d.next; }
+      try { await call('drag', {action, x: p.x, y: p.y}); }
+      catch (error) { if (action === 'down') { d.failed = true; message(error.message, true); } }
+    });
+  }
+  view.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;
+    const p = toScreen(e.clientX, e.clientY);
+    mouseDrag = p && {id: e.pointerId, x: e.clientX, y: e.clientY, start: p, active: false};
+  });
+  view.addEventListener('pointermove', e => {
+    const d = mouseDrag; if (!d || e.pointerId !== d.id) return;
+    if (!d.active) {
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) return;
+      d.active = true;
+      try { view.setPointerCapture(e.pointerId); } catch {}
+      dragSend(d, 'down', d.start);
+      // Holding still keeps the button down (the NAS lets go by itself if the page disappears).
+      d.keep = setInterval(() => { if (!d.failed) dragSend(d, 'move', d.last); }, 2000);
+    }
+    if (!d.failed) dragSend(d, 'move', toScreen(e.clientX, e.clientY) || toScreenClamped(e.clientX, e.clientY) || d.last);
+  });
+  function endMouseDrag(e) {
+    const d = mouseDrag; if (!d || e.pointerId !== d.id) return;
+    mouseDrag = null;
+    clearInterval(d.keep);
+    if (!d.active) return;
+    // The browser still sends a click after the button comes up; that click is not a tap.
+    dragJustEnded = true; setTimeout(() => { dragJustEnded = false; }, 0);
+    if (!d.failed) dragSend(d, 'up', toScreen(e.clientX, e.clientY) || toScreenClamped(e.clientX, e.clientY) || d.last);
+  }
+  view.addEventListener('pointerup', endMouseDrag);
+  view.addEventListener('pointercancel', endMouseDrag);
+  function toScreenClamped(cx, cy) {
+    if (!fit || !rect) return null;
+    const x = Math.min(Math.max((cx - fit.left) / fit.scale * unit, 0), rect[2] - 1);
+    const y = Math.min(Math.max((cy - fit.top) / fit.scale * unit, 0), rect[3] - 1);
+    return {x: Math.round(rect[0] + x), y: Math.round(rect[1] + y)};
+  }
   view.addEventListener('click', e => {
     // Finger taps are handled by the touch code below; the browser's own click after them is ignored.
     // The second click of a double-click is sent as one native double-click (QQ previews), or dropped.
     if (lastPointer === 'touch' || e.detail > 1) return;
+    if (dragJustEnded) return;
     const p = toScreen(e.clientX, e.clientY); if (!p) return;
     handleClick(p, e);
   });
@@ -538,6 +585,8 @@
       reader.onerror = reader.onabort = () => reject(Error('读取图片或文件失败，请重新选择本机文件'));
       reader.readAsArrayBuffer(file);
     });
+    const home = await globalThis.nasLan?.upload?.(bytes, {name: file.name, id, window: job.window, conversation: job.conversation}, progress);
+    if (home) return home;
     return new Promise((resolve, reject) => {
       const request = new XMLHttpRequest();
       request.open('POST', '/mobile-api/upload');

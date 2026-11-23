@@ -1,6 +1,6 @@
 # nas-chat-mobile
 
-当前版本：**0.6.4** · [更新记录](CHANGELOG.md)
+当前版本：**0.6.5** · [更新记录](CHANGELOG.md)
 
 把运行在 NAS 上的**桌面版聊天客户端**变成**手机浏览器里可触控使用的界面**。
 
@@ -21,11 +21,12 @@
 - **防误点**：会话列表因新消息重新排序时，点击前比对行指纹，不一致就不点。
 - **画面传输**：默认使用 WebSocket 按横条增量推送，滚动行在手机端复用；每帧解码后确认，未确认数据较少时允许第二帧在途，公网长往返不再逐帧等待。滑动中的条带用较轻的全分辨率 JPEG，停下后自动补发清晰画面。连接中断自动降级为逐帧请求，并定时重试。
 - **清晰度**：首屏与会话切换保留原始分辨率；默认清晰优先，内网 IP 的新画面先发清晰 JPEG，稳定后补为无损 PNG。慢连接可在菜单切换为流畅优先。
-- **家里直连**：可为内网 IP 单独配置 HTTPS；设置页提供 iPhone 证书安装指引，菜单显示连接方式。从公网地址打开时，若设备信任内网证书且在家，画面推流自动改走内网（「优先家里直连」，可在菜单关闭）。
-- **电脑视图**：电脑浏览器和 iPad 打开同一网址自动进入，显示完整的双栏客户端（微信拉宽为双栏，QQ 改为横向窗口），支持鼠标、右键、滚轮与拖入文件；iPad 支持轻点、长按菜单、拖动滚动与 Magic Keyboard 触控板。输入框与原生输入框重合、本机即时输入，Enter 立即发送；离开后自动恢复手机布局。
+- **家里直连**：可为内网 IP 单独配置 HTTPS；设置页提供 iPhone 证书安装指引，菜单显示连接方式。从公网地址打开时，若设备信任内网证书且在家，画面推流和照片 / 文件上传自动改走内网（「优先家里直连」，可在菜单关闭）；内网不通时上传自动退回原地址，同一请求不会重复发送。
+- **电脑视图**：电脑浏览器和 iPad 打开同一网址自动进入，显示完整的双栏客户端（微信拉宽为双栏，QQ 改为横向窗口），支持鼠标、右键、滚轮、按住拖动（滚动条、滑块、选中文字）与拖入文件；iPad 支持轻点、长按菜单、拖动滚动与 Magic Keyboard 触控板。输入框与原生输入框重合、本机即时输入，Enter 立即发送；离开后自动恢复手机布局。
 - **全览**：需要时可按需加载原远程桌面。
 - **独立登录**：签名 Cookie 会话（30 天）、按 IP 限制登录失败次数，支持「退出所有设备」。
 - **PWA**：可添加到主屏幕，以全屏方式打开。
+- **macOS 客户端**：`macos/` 提供原生窗口版「NAS 聊天」，微信 / QQ 两个标签；在家自动改用内网地址，离家自动回到公网地址。见 [macOS 客户端](#macos-客户端)。
 
 ## 工作原理
 
@@ -50,6 +51,7 @@ server.py ──Xlib / xdotool / xclip──> X 显示器 :1 上的客户端窗�
 - 64 位 Linux：支持 Intel / AMD x86_64（`linux/amd64`）和 ARM64（`linux/arm64`），包括普通服务器、虚拟机和提供 Docker 的 NAS。32 位 x86 / ARMv7 不支持。
 - Docker Engine（至少 20.10，建议受维护版本）与 Docker Compose v2；安装脚本需要 Bash。详见 [通用 Linux 与群晖部署说明](docs/linux-deployment.md)。
 - 可用的 HTTPS 访问方式：反向代理、Cloudflare Tunnel、VPN 等。登录 Cookie 带有 `Secure` 和 `__Host-` 前缀，纯 HTTP 无法登录。
+  - 使用 Cloudflare Tunnel 时建议给 `cloudflared` 加 `--protocol http2`。默认的 QUIC 走 UDP，部分家用路由器会悄悄断开长时间的 UDP 连接：隧道仍显示已连接，但请求到不了 NAS，表现为页面打不开、发图超时。改用 HTTP/2（TCP）可避免。
 - 建议宿主机内存 4 GB 以上，镜像与构建缓存预留至少 12 GB 磁盘，聊天数据另计。不需要 GPU 或宿主机桌面。
 
 0.4.0 已完成原生 x86_64 Linux 容器构建与截图、输入、登录、WebSocket 冒烟验证；群晖真机与真实账号操作尚待部署验证，详见 [验证范围](docs/linux-deployment.md#验证与故障定位)。
@@ -148,6 +150,16 @@ docker exec chat-remote s6-svc -r /run/wechat-mobile-service
 
 建议使用稳定的 HTTPS 域名或隧道地址。临时隧道地址改变后，需更新 `origin`、重启服务，并在新地址重新添加主屏幕入口和开启通知。内网 IP 入口不提供此开关。
 
+## macOS 客户端
+
+从 [Releases](https://github.com/robavionix/nas-chat-mobile/releases) 下载 `NASChat-版本号.dmg`，打开后把「NAS 聊天」拖进「应用程序」。应用为通用二进制（Apple 芯片与 Intel），需要 macOS 13 或更高版本。
+
+- 应用只做了临时签名，没有经过 Apple 公证。第一次打开请在「应用程序」里按住 Control 点按「NAS 聊天」→「打开」，或在「系统设置 → 隐私与安全性」中允许。
+- 在菜单「NAS 聊天 → 设置当前服务地址…」（⌘,）分别填写微信和 QQ 的公网 HTTPS 地址。
+- 服务端配置了[内网 IP HTTPS](#可选内网-ip-https) 时，登录后应用会从公网地址读取 `lan-config.json` 和根证书 `lan-root.cer`，之后在家自动改用内网地址，窗口标题显示「家里直连」；网络变化、唤醒或回到应用时重新检查，内网不通即回到公网地址。根证书只用于这一个内网地址和端口，不会加入系统钥匙串。内外网地址各自保存登录状态，第一次走内网时需要再登录一次。
+- 菜单「优先家里直连」可以关闭自动切换。macOS 首次连接内网时会询问是否允许访问本地网络，请选择允许。
+- 从源码构建：`bash macos/build.sh`，输出 `macos/dist/NASChat-macOS.zip` 和 `NASChat-版本号.dmg`（需要 Xcode 命令行工具）。
+
 ## 升级
 
 先备份部署目录中的 `config/mobile/`、`mobile-init/`、`mobile-services/`，然后在源码仓库执行 `git pull --ff-only`。复制新版后端、网页脚本与 HTML、启动脚本到部署目录，重启主容器，使 nginx 的 WebSocket 路由生效：
@@ -188,6 +200,8 @@ node tests/test_render.cjs
 node tests/test_scroll.cjs
 node tests/test_desktop.cjs
 node tests/test_desktop_input.cjs
+node tests/test_routes.cjs
+node tests/test_lan_upload.cjs
 bash -n scripts/setup-lan.sh
 bash -n mobile-init/50-mobile
 bash -n mobile-services/mobile/run
@@ -198,7 +212,7 @@ bash tests/test_deploy.sh
 bash tests/test_lan.sh
 ```
 
-这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴、过渡与侧滑生命周期、Retina 解码超时与内存释放、QQ 搜索及滚动布局恢复，以及通知权限、订阅撤销、过期处理和消息预览。不会向真实联系人或真实推送端点发送测试消息。
+这些检查覆盖分段网络读取、传输回退、无损画质、快速输入、失败恢复、图片粘贴、过渡与侧滑生命周期、Retina 解码超时与内存释放、QQ 搜索及滚动布局恢复，以及通知权限、订阅撤销、过期处理和消息预览，还有家里直连上传凭证、跨域预检、上传退回公网和电脑视图鼠标拖动。不会向真实联系人或真实推送端点发送测试消息。
 
 ## 配置说明
 
@@ -212,6 +226,7 @@ bash tests/test_lan.sh
 - 只通过 HTTPS 访问。条件允许时，再加一层访问控制（如 Cloudflare Access、VPN）。
 - 手机丢失时，在菜单中选择「退出所有设备」，会更换会话密钥，所有已登录设备都需要重新登录。
 - 上传的文件临时存放在 `config/mobile/uploads/`，2 小时后自动删除。
+- 上传接口由服务自己校验登录 Cookie 或 2 分钟有效的上传凭证（凭证只能经已登录的原地址领取，只能用于上传）；聊天对象和文件名放在请求内容里，不出现在网址中。
 - 诊断记录默认关闭。创建 `config/mobile/debug/enabled` 文件即可开启，记录内容只有坐标和状态，不包含消息文本。
 
 ## 已知限制
@@ -222,7 +237,7 @@ bash tests/test_lan.sh
 - 图片粘贴依赖 iOS / 来源 App 是否把图片提供给网页剪贴板；若来源只提供文字或链接，可以使用“＋”从照片或文件选择。
 - 画面在动的时候刷新率约为每秒 5～10 帧，适合聊天类操作，不适合看视频。
 - 按单用户设计，多台设备共用同一个桌面。电脑视图打开时客户端处于横向双栏布局，手机只能查看电脑当前打开的聊天，电脑离开约 20 秒后恢复。
-- 「优先家里直连」只转移画面推流；点击、发送等操作仍经原地址。设备需要信任内网根证书，部分浏览器首次访问会询问本地网络权限。
+- 「优先家里直连」转移画面推流和照片 / 文件上传；点击、发送文字等操作仍经原地址，上传前也要先经原地址领取凭证，原地址完全不通时请直接打开内网地址。设备需要信任内网根证书，部分浏览器首次访问会询问本地网络权限。
 
 ## 免责声明
 
@@ -242,7 +257,7 @@ bash tests/test_lan.sh
 
 ## English summary
 
-**nas-chat-mobile 0.6.4** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP frames settle to lossless PNG. A second picture may be in flight while little data is unacknowledged, and moving strips use a lighter full-resolution JPEG before being refined. Computer browsers and iPads get a desktop view of the full two-pane client with instant local typing over the native input box, and a page opened at the public address can stream its picture over the home network when the device trusts the LAN certificate. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
+**nas-chat-mobile 0.6.5** adds a touch-friendly phone interface to a desktop chat client running inside the [linuxserver/docker-weixin](https://github.com/linuxserver/docker-weixin) web desktop container. It includes local scrolling, linear list/chat transitions, touch gestures, text and clipboard-image sending, pop-up windows, and a home-screen web app. The Python service captures X11 screenshots and pushes changed JPEG/PNG strips over an acknowledged WebSocket, falling back to frame requests when necessary. Clear mode preserves native resolution; private-IP frames settle to lossless PNG. A second picture may be in flight while little data is unacknowledged, and moving strips use a lighter full-resolution JPEG before being refined. Computer browsers and iPads get a desktop view of the full two-pane client with instant local typing over the native input box, and a page opened at the public address can stream its picture over the home network when the device trusts the LAN certificate. With the home-network route, photo and file uploads go to the LAN entry as well, authorised by a short-lived upload token and falling back to the public address without sending twice. The desktop view forwards mouse drags (scrollbars, sliders, text selection). A native macOS app (`macos/`, DMG in Releases) switches to the LAN entry automatically at home. Optional scripts provision a separate LAN HTTPS proxy and an iPhone root-certificate setup page. QQ Linux can be deployed in its own native amd64 or arm64 container with independent accounts, cookies and optional push notifications. Its iPhone portrait view supports 3x native drawing and a readable fixed header. Existing neutral branding and icons are retained.
 
 Native Linux amd64 and arm64 deployments share one Compose configuration. The local Docker build installs isolated Python and X11 dependencies; setup, environment checks, health checks and Synology instructions are included. See [Linux deployment and validation scope](docs/linux-deployment.md).
 

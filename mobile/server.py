@@ -786,6 +786,20 @@ def run(*args, data=None):
 
 
 last_click = {'time': 0, 'x': -99, 'y': -99}
+# mouse-drag-v1: a computer's mouse can hold a button down and move, for scrollbars and selections.
+drag_state = {'down': False, 'timer': None}
+
+
+def release_drag():
+    # A page that disappeared mid-drag must not leave the button held down on the NAS.
+    with lock:
+        drag_state['timer'] = None
+        if drag_state['down']:
+            drag_state['down'] = False
+            try:
+                run('xdotool', 'mouseup', '1')
+            except Exception:
+                pass
 
 
 def native_click(current, x, y, button=1, activate=True, guard=False):
@@ -940,6 +954,20 @@ def stream_token_valid(token, fresh=True):
         kind, expiry, nonce, signature = token.split('.')
         expected = hmac.new(session_key, '.'.join((kind, expiry, nonce)).encode(), hashlib.sha256).hexdigest()
         return kind == 'stream' and hmac.compare_digest(expected, signature) and (not fresh or int(expiry) > time.time())
+    except (ValueError, AttributeError):
+        return False
+# Home-network uploads (0.6.5): pictures and files may also take the home-network entry. The page stays on the
+# public address, so the upload carries a short-lived token instead of the session cookie.
+UPLOAD_TOKEN_SECONDS = 120
+CORS_ORIGIN = re.compile(r'https://[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d{1,5})?')
+def upload_token():
+    body = 'upload.' + str(int(time.time()) + UPLOAD_TOKEN_SECONDS) + '.' + secrets.token_hex(8)
+    return body + '.' + hmac.new(session_key, body.encode(), hashlib.sha256).hexdigest()
+def upload_token_valid(token):
+    try:
+        kind, expiry, nonce, signature = token.split('.')
+        expected = hmac.new(session_key, '.'.join((kind, expiry, nonce)).encode(), hashlib.sha256).hexdigest()
+        return kind == 'upload' and hmac.compare_digest(expected, signature) and int(expiry) > time.time()
     except (ValueError, AttributeError):
         return False
 
@@ -1231,6 +1259,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(body)))
+        cors = self.__dict__.pop('cors_origin', None)
+        if cors:
+            self.send_header('Access-Control-Allow-Origin', cors)
+            self.send_header('Vary', 'Origin')
         if cookie:
             self.send_header('Set-Cookie', cookie)
         self.end_headers()
@@ -1673,10 +1705,29 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.reply(404, error='不存在的操作')
 
+    def do_OPTIONS(self):
+        origin = self.headers.get('Origin', '')
+        if self.path != '/upload?via=lan' or not CORS_ORIGIN.fullmatch(origin):
+            return self.reply(403, error='不允许的请求')
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', origin)
+        self.send_header('Access-Control-Allow-Methods', 'POST')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Private-Network', 'true')
+        self.send_header('Access-Control-Max-Age', '600')
+        self.send_header('Vary', 'Origin')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
     def do_POST(self):
+        self.cors_origin = None
+        if self.path == '/upload?via=lan':
+            return self.upload(lan=True)
         if self.headers.get('X-Mobile-Control') != '1':
             return self.reply(403, error='请从手机界面操作')
         if self.path == '/upload':
+            if not authenticated(self.headers):
+                return self.reply(401, error='请重新登录')
             return self.upload()
         if self.headers.get('Content-Type') != 'application/json':
             return self.reply(403, error='请从手机界面操作')
@@ -1720,6 +1771,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(404, error='不存在的推送操作')
                 except ValueError as error:
                     return self.reply(400, error=str(error))
+            if self.path == '/upload-token':
+                if not authenticated(self.headers):
+                    return self.reply(401, error='请重新登录')
+                return self.reply(200, ok=True, token=upload_token())
             if self.path == '/stream-token':
                 if not authenticated(self.headers):
                     return self.reply(401, error='请重新登录')
@@ -1737,7 +1792,7 @@ class Handler(BaseHTTPRequestHandler):
                 session_key = secrets.token_bytes(32)
                 temporary = keyfile.with_suffix('.tmp'); temporary.write_bytes(session_key); temporary.chmod(0o600); temporary.replace(keyfile)
                 return self.reply(200, cookie=SESSION_COOKIE + '=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0', ok=True)
-            actions = {'/send': self.send, '/tap': self.tap, '/view': self.view, '/prepare': self.prepare, '/window': self.window, '/scroll': self.scroll, '/search': self.search, '/input': self.native_input}
+            actions = {'/send': self.send, '/tap': self.tap, '/view': self.view, '/prepare': self.prepare, '/window': self.window, '/scroll': self.scroll, '/drag': self.drag, '/search': self.search, '/input': self.native_input}
             if self.path not in actions:
                 return self.reply(404, error='不存在的操作')
             with lock:
@@ -1799,12 +1854,27 @@ class Handler(BaseHTTPRequestHandler):
         # Scrolling to the newest message happens after the reply, so the sender is not kept waiting.
         threading.Thread(target=scroll_after_send, args=(current,), daemon=True).start()
         return self.reply(200, ok=True, confirmed=True, layout=result)
-    def upload(self):
+    def upload(self, lan=False):
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            name = unquote(self.headers.get('X-File-Name', ''))
-            request_id = self.headers.get('X-Request-Id', '')
-            payload = {'window': self.headers.get('X-Window'), 'conversation': unquote(self.headers.get('X-Conversation', ''))}
+            if lan:
+                origin = self.headers.get('Origin', '')
+                if CORS_ORIGIN.fullmatch(origin):
+                    self.cors_origin = origin
+                size = int.from_bytes(self.rfile.read(4), 'big') if length > 4 else 0
+                if not 0 < size <= 16384 or size > length - 4:
+                    return self.reply(400, error='请求格式错误')
+                meta = json.loads(self.rfile.read(size))
+                if not isinstance(meta, dict) or not upload_token_valid(meta.get('token')):
+                    return self.reply(401, error='家里直连凭证已过期')
+                length -= 4 + size
+                name, request_id = str(meta.get('name') or ''), str(meta.get('id') or '')
+                window = meta.get('window')
+                payload = {'window': None if window is None else str(window), 'conversation': str(meta.get('conversation') or '')}
+            else:
+                name = unquote(self.headers.get('X-File-Name', ''))
+                request_id = self.headers.get('X-Request-Id', '')
+                payload = {'window': self.headers.get('X-Window'), 'conversation': unquote(self.headers.get('X-Conversation', ''))}
         except ValueError:
             return self.reply(400, error='请求格式错误')
         if length <= 0:
@@ -2073,6 +2143,51 @@ class Handler(BaseHTTPRequestHandler):
             run('xdotool', 'key', '--clearmodifiers', 'ctrl+a', 'BackSpace')
         return self.reply(200, ok=True)
 
+
+    def drag(self, payload):
+        """Press, move and release the left button for the computer view (mouse-drag-v1)."""
+        action, x, y = payload.get('action'), payload.get('x'), payload.get('y')
+        if action not in ('down', 'move', 'up') or not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y)):
+            return self.reply(400, error='请求格式错误')
+        if not desktop_lease['clients']:
+            return self.reply(409, error='电脑视图尚未连接')
+        if drag_state['timer']:
+            drag_state['timer'].cancel()
+            drag_state['timer'] = None
+        current = layout()
+        if action == 'down':
+            inside = lambda w: w['x'] <= x < w['x'] + w['width'] and w['y'] <= y < w['y'] + w['height']
+            popup = next((p for p in current['popups'] if inside(p)), None)
+            if not popup:
+                if not inside(current):
+                    return self.reply(400, error='请点选' + client.label + '窗口里的内容')
+                # The title bar's own buttons would minimise, maximise or close the client on the NAS.
+                band, buttons = (40 * QQ_SCALE, 200 * QQ_SCALE) if current.get('client') == 'qq' else (60, 300)
+                if y < current['y'] + band and x >= current['x'] + current['width'] - buttons:
+                    return self.reply(400, error='窗口按钮在电脑视图里不可用')
+            if drag_state['down']:
+                run('xdotool', 'mouseup', '1')
+            if not popup:
+                run('xdotool', 'windowactivate', '--sync', current['id'])
+            run('xdotool', 'mousemove', str(x), str(y), 'mousedown', '1')
+            drag_state['down'] = True
+        elif not drag_state['down']:
+            return self.reply(409, error='拖动已结束，请重新按住')
+        else:
+            # Moving outside the window keeps dragging (like a real mouse), but never off the screen.
+            x = max(0, min(x, current['screenWidth'] - 1))
+            y = max(0, min(y, current['screenHeight'] - 1))
+            if action == 'move':
+                run('xdotool', 'mousemove', str(x), str(y))
+            else:
+                run('xdotool', 'mousemove', str(x), str(y), 'mouseup', '1')
+                drag_state['down'] = False
+                last_click.update(time=time.monotonic(), x=x, y=y)
+        if drag_state['down']:
+            timer = drag_state['timer'] = threading.Timer(4, release_drag)
+            timer.daemon = True
+            timer.start()
+        return self.reply(200, ok=True)
 
     def scroll(self, payload):
         x, y, amount = payload.get('x'), payload.get('y'), payload.get('amount')

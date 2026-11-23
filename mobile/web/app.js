@@ -367,6 +367,8 @@ async function uploadOne(file,id,target){
       reader.onerror = reader.onabort = () => reject(Error('读取图片或文件失败，请重新选择本机文件'));
       reader.readAsArrayBuffer(file);
     });
+    const home = await globalThis.nasLan?.upload?.(bytes, {name: file.name, id, window: target.window, conversation: target.conversation}, target.progress);
+    if (home) return home;
     return new Promise((resolve,reject)=>{
     const request=new XMLHttpRequest();
     request.open('POST','/mobile-api/upload');
@@ -430,7 +432,7 @@ function periodicLayoutUpdate(){
 }
 document.addEventListener('DOMContentLoaded',()=>{setInterval(periodicLayoutUpdate,15000);viewport();controls();update()});
 debugLog('load',{agent:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,standalone:!!navigator.standalone});
-const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.6.4',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
+const mobileWorkerRegistration='serviceWorker'in navigator?navigator.serviceWorker.register('./sw.js?v=0.6.5',{updateViaCache:'none'}).catch(()=>null):Promise.resolve(null);
 
 // Optional LAN configuration is generated on the deployment host, never baked into the bundle.
 fetch('/mobile/lan-config.json',{cache:'no-store'}).then(r=>r.ok?r.json():{}).then(config=>{
